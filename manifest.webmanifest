@@ -1,0 +1,23 @@
+{
+  "name": "Bildtransformer",
+  "short_name": "Bildtransformer",
+  "description": "Fotos lokal bearbeiten: Schrift entfernen, Stile, Farben und freie Kommandos – alles bleibt auf dem Gerät.",
+  "lang": "de",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#111315",
+  "theme_color": "#111315",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "share_target": {
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": { "files": [{ "name": "image", "accept": ["image/*"] }] }
+  }
+}
