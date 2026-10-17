@@ -21,13 +21,15 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 
 | Bereich | Funktion |
 |---|---|
-| Schrift | automatische Erkennung (auch schräg), Rekonstruktion in voller Auflösung, „Verbessern“ für einen zweiten Durchgang, „Nachmalen“ für übersehene Stellen |
+| Schrift | automatische Erkennung (auch schräg), zusätzliche Suche nach blasser Schrift, Rekonstruktion in voller Auflösung, „Verbessern“ für einen zweiten Durchgang, „Nachmalen“ für übersehene Stellen |
+| Transparente Schrift | Farbe und Deckkraft werden geschätzt und die Schrift herausgerechnet – das Foto darunter bleibt erhalten statt neu erfunden zu werden (bis ca. 65 % Deckkraft; stärker deckende Schrift wird rekonstruiert) |
 | Objekte | „Objekt weg“: übermalen und entfernen lassen |
 | Korrektur | Auto, Heller/Dunkler, Kontrast, Wärmer/Kälter, Schärfer/Weicher, Kräftiger/Blasser |
 | Stil | Retro (Sepia, Körnung, Vignette), Schwarzweiß, kontrastreiches Schwarzweiß |
 | Farbe | Farbton antippen und entfernen, „Nur eine Farbe behalten“, Farbstich entfernen (per Kommando) |
 | Kommandos | freie Sätze wie „etwas wärmer und das Rot raus“, „deutlich heller, mehr Kontrast“, „nur Blau behalten“, „Gelbstich entfernen“, „Retro-Look“, „rückgängig“, „zurück zum Original“ |
 | Qualität | Standard (MI-GAN, schnell) oder Höchste Qualität (LaMa, einmalig 208 MB, langsamer) unter „Mehr“ |
+| Reset | schließt das aktuelle Foto und zeigt wieder die leere Fläche (mit Rückfrage, wenn schon bearbeitet wurde) |
 
 ## Aufbau
 
@@ -46,6 +48,7 @@ Die Rekonstruktionsmodelle werden beim ersten Gebrauch von Hugging Face geladen 
 ## Grenzen
 
 - Rekonstruktion erfindet plausiblen Inhalt; bei Gesichtern, Schrift im Motiv oder feinen Strukturen kann sie danebenliegen.
+- Sehr blasse Schrift über unruhigem Hintergrund wird nicht immer vollständig automatisch gefunden. Dann mit „Nachmalen“ grob über die Reste malen – die App schätzt Farbe und Deckkraft auch dort und rechnet die Schrift heraus.
 - Fotos über 4096 Pixel Kantenlänge werden auf 4096 verkleinert.
 - Das Kommandofeld versteht die eingebauten Werkzeuge. Echtes Neu-Malen („Himmel als Sonnenuntergang“) ist nicht enthalten.
 - „Höchste Qualität“ braucht viel Arbeitsspeicher; auf älteren Handys kann es abbrechen – dann auf Standard zurückstellen.

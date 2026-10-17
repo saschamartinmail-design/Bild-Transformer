@@ -41,6 +41,11 @@
     display: grid; place-items: center;
   }
   svg { display: block; }
+  .head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+  .ghost {
+    height: 44px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
+    display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600;
+  }
 
   /* ---------- Bildbereich ---------- */
   #stage { position: relative; display: flex; justify-content: center; }
@@ -138,9 +143,15 @@
       <h1>Bildtransformer</h1>
       <p id="meta">Alles bleibt auf deinem Gerät</p>
     </div>
-    <button id="addBtn" class="fab" type="button" aria-label="Foto auswählen">
-      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
+    <div class="head-actions">
+      <button id="resetBtn" class="ghost" type="button" aria-label="Foto schließen und neu beginnen" hidden>
+        <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+        <span>Reset</span>
+      </button>
+      <button id="addBtn" class="fab" type="button" aria-label="Foto auswählen">
+        <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
   </header>
 
   <section id="stage">
@@ -240,6 +251,15 @@
   </div>
   <button class="btn" type="button" id="moreClose" style="width:100%">Schließen</button>
   <p class="small" id="engineInfo"></p>
+</dialog>
+
+<dialog id="resetDlg">
+  <h2>Foto schließen?</h2>
+  <p>Das aktuelle Foto und alle Bearbeitungsschritte werden verworfen. Nicht gespeicherte Ergebnisse gehen verloren.</p>
+  <div class="row">
+    <button class="btn" type="button" id="resetNo">Abbrechen</button>
+    <button class="btn primary" type="button" id="resetYes">Schließen</button>
+  </div>
 </dialog>
 
 <dialog id="qualityDlg">

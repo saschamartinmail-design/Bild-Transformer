@@ -7,7 +7,7 @@
   const HISTORY_MAX = 12;
 
   const el = {
-    addBtn: $('addBtn'), empty: $('empty'), file: $('file'), meta: $('meta'),
+    addBtn: $('addBtn'), resetBtn: $('resetBtn'), resetDlg: $('resetDlg'), resetYes: $('resetYes'), resetNo: $('resetNo'), empty: $('empty'), file: $('file'), meta: $('meta'),
     viewer: $('viewer'), cvOrig: $('cvOrig'), cvResult: $('cvResult'), cvMask: $('cvMask'),
     divider: $('divider'), tagL: $('tagL'), tagR: $('tagR'), undoBtn: $('undoBtn'),
     savePills: $('savePills'), saveBtn: $('saveBtn'), shareBtn: $('shareBtn'),
@@ -98,7 +98,7 @@
   function disableUI(b) {
     el.tools.querySelectorAll('button').forEach((x) => { x.disabled = b || !state.loaded; });
     [el.improveBtn, el.retouchBtn].forEach((x) => { x.disabled = b || !state.loaded; });
-    el.addBtn.disabled = b;
+    el.addBtn.disabled = b; el.resetBtn.disabled = b;
     el.cmdForm.querySelector('button').disabled = b;
     el.undoBtn.disabled = b || state.history.length === 0;
     el.brushApply.disabled = b; el.brushCancel.disabled = b;
@@ -166,6 +166,7 @@
     el.meta.textContent = `${state.name} · ${w} × ${h}${s < 1 ? ' (verkleinert)' : ''}`;
     el.empty.hidden = true;
     el.viewer.hidden = false;
+    el.resetBtn.hidden = false;
     exitModes();
     layout();
     setPos(0.5);
@@ -174,9 +175,32 @@
     await removeText(true);
   }
 
+  // ------------------------------------------------------------ Reset (leere Fläche)
+  function resetPhoto() {
+    exitModes();
+    hideSave();
+    for (const c of [el.cvOrig, el.cvResult, el.cvMask]) { c.width = 1; c.height = 1; }
+    Object.assign(state, { loaded: false, w: 0, h: 0, name: '', type: 'image/jpeg', history: [], text: null, pos: 0.5 });
+    el.viewer.hidden = true;
+    el.viewer.style.width = ''; el.viewer.style.height = '';
+    el.empty.hidden = false;
+    el.resetBtn.hidden = true;
+    el.meta.textContent = 'Alles bleibt auf deinem Gerät';
+    el.chat.textContent = '';
+    el.tools.scrollLeft = 0;
+    el.cmd.value = ''; autoGrow();
+    disableUI(false);
+    defaultHint();
+  }
+  function askReset() {
+    if (state.busy || !state.loaded) return;
+    if (!state.history.length) { resetPhoto(); return; }
+    el.resetDlg.showModal();
+  }
+
   // ------------------------------------------------------------ KI-Funktionen
   async function removeText(auto) {
-    let found = false;
+    let found = false, reversed = 0;
     const ok = await run('Schrift wird gesucht …', async () => {
       const cur = getCur();
       const base = copyImageData(cur);
@@ -190,10 +214,13 @@
       }
       applyResult(m);
       state.text = { base, mask: new Uint8Array(m.mask.buffer), detect: true };
-      found = true;
+      found = true; reversed = m.reversed || 0;
     });
     if (!ok) return null;
-    if (found) addMsg('ai', auto ? 'Schrift erkannt und entfernt. Wenn noch Reste zu sehen sind: „Verbessern“ oder „Nachmalen“.' : 'Schrift entfernt.');
+    if (found) {
+      const rev = reversed ? ' Halbtransparente Schrift wurde dabei zurückgerechnet, das Foto darunter bleibt erhalten.' : '';
+      addMsg('ai', (auto ? 'Schrift erkannt und entfernt.' : 'Schrift entfernt.') + rev + ' Reste? „Nachmalen“ – grob drübermalen genügt.');
+    }
     else addMsg('ai', 'Ich habe keine Schrift gefunden. Mit „Nachmalen“ kannst du Stellen selbst markieren.');
     return { found };
   }
@@ -231,7 +258,7 @@
       applyResult(m);
       state.text = { base: t.base, mask: new Uint8Array(m.mask.buffer), detect: t.detect };
     });
-    if (ok) addMsg('ai', quality() === 'high' ? 'Mit höchster Qualität neu rekonstruiert.' : 'Neu rekonstruiert, mit etwas größerem Bereich.');
+    if (ok) addMsg('ai', (quality() === 'high' ? 'Mit höchster Qualität neu bearbeitet' : 'Neu bearbeitet, mit gründlicherer Suche und etwas größerem Bereich') + '.');
   }
 
   // Filter auf das Ergebnis anwenden (und auf die Basis für spätere Verbesserungen)
@@ -386,7 +413,8 @@
       pushHistory();
       if (retouch) {
         const base = copyImageData(t.base);
-        const m = await call('inpaintMask', { image: pack(base), mask: { buffer: mask.buffer }, quality: quality() }, [base.data.buffer, mask.buffer]);
+        const union = BT.maskUnion(t.mask, mask);
+        const m = await call('inpaintMask', { image: pack(base), mask: { buffer: union.buffer }, quality: quality(), smart: t.detect }, [base.data.buffer, union.buffer]);
         applyResult(m);
         state.text = { base: t.base, mask: new Uint8Array(m.mask.buffer), detect: t.detect };
       } else {
@@ -450,6 +478,9 @@
   // ------------------------------------------------------------ Ereignisse
   const pickFile = () => { if (!state.busy) el.file.click(); };
   el.addBtn.addEventListener('click', pickFile);
+  el.resetBtn.addEventListener('click', askReset);
+  el.resetYes.addEventListener('click', () => { el.resetDlg.close(); resetPhoto(); });
+  el.resetNo.addEventListener('click', () => el.resetDlg.close());
   el.empty.addEventListener('click', pickFile);
   el.file.addEventListener('change', () => { const f = el.file.files[0]; el.file.value = ''; loadFile(f); });
   el.undoBtn.addEventListener('click', async () => { if (!state.busy && await undo()) addMsg('ai', 'Rückgängig gemacht.'); });

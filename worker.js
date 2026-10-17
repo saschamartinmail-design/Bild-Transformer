@@ -135,11 +135,23 @@ async function inpaint(img, mask, quality, opt) {
   return BT.inpaintTiles(img, mask, modelRunner(key, sess), o);
 }
 
-// Nach dem Füllen: übrig gebliebene Schriftreste in der Nähe der Maske suchen und nachfüllen
+// Suche auf dem Foto und zusätzlich auf einer kontrastverstärkten Variante (findet blasse Schrift)
+async function detectBoth(img, opt) {
+  const a = await detectMask(img, opt);
+  status('Blasse Schrift wird gesucht …', null);
+  return BT.maskUnion(a, await detectMask(BT.highpassVariant(img), opt));
+}
+
+// Schrift entfernen; halbtransparente Bereiche werden zurückgerechnet statt neu erfunden
+async function smartRemove(img, mask, quality) {
+  return BT.removeTextSmart(img, mask, (im, mk) => inpaint(im, mk, quality), { onStage: (t) => status(t, null) });
+}
+
+// Nach dem Entfernen: Schriftreste suchen, die überwiegend in der Textmaske liegen, und nachfüllen
 async function cleanupPass(res, mask, quality) {
   const W = res.width, H = res.height;
-  const near = BT.dilate(mask, W, H, Math.round(0.02 * Math.max(W, H)));
-  const resid = BT.maskIntersect(await detectMask(res, { thresh: 0.25, boxThresh: 0.4 }), near);
+  const zone = BT.dilate(mask, W, H, Math.max(2, Math.round(0.004 * Math.max(W, H))));
+  const resid = BT.filterResidual(await detectMask(res, { thresh: 0.25, boxThresh: 0.4 }), zone, W, H, 0.6);
   if (BT.maskArea(resid) === 0) return { image: res, mask };
   status('Reste werden entfernt …', null);
   const out = await inpaint(res, resid, quality, { shift: 0.5 });
@@ -166,11 +178,11 @@ const handlers = {
   },
   async removeText(m) {
     const img = toImg(m.image);
-    const mask = await detectMask(img, {});
+    const mask = await detectBoth(img, {});
     if (BT.maskArea(mask) === 0) return [null, { found: false }];
-    const res = await inpaint(img, mask, m.quality);
-    const fin = await cleanupPass(res, mask, m.quality);
-    return [fin.image, { found: true, mask: fin.mask }];
+    const sm = await smartRemove(img, mask, m.quality);
+    const fin = await cleanupPass(sm.image, sm.mask, m.quality);
+    return [fin.image, { found: true, mask: fin.mask, reversed: sm.reversed }];
   },
   async improve(m) {
     const base = toImg(m.base), cur = toImg(m.current);
@@ -179,16 +191,25 @@ const handlers = {
     let mask = prev;
     if (m.detect) {
       const near = BT.dilate(prev, W, H, Math.round(0.02 * Math.max(W, H)));
-      mask = BT.maskUnion(prev, BT.maskIntersect(await detectMask(cur, { thresh: 0.22, boxThresh: 0.35 }), near));
+      mask = BT.maskUnion(prev, BT.filterResidual(await detectBoth(cur, { thresh: 0.22, boxThresh: 0.35 }), near, W, H, 0.6));
     }
     mask = BT.dilate(mask, W, H, Math.max(2, Math.round(0.006 * Math.max(W, H))));
+    if (m.detect) {
+      const sm = await smartRemove(base, mask, m.quality);
+      const fin = await cleanupPass(sm.image, BT.maskUnion(sm.mask, BT.maskIntersect(mask, prev)), m.quality);
+      return [fin.image, { mask: fin.mask, reversed: sm.reversed }];
+    }
     const res = await inpaint(base, mask, m.quality, { shift: 0.5 });
-    const fin = m.detect ? await cleanupPass(res, mask, m.quality) : { image: res, mask };
-    return [fin.image, { mask: fin.mask }];
+    return [res, { mask }];
   },
   async inpaintMask(m) {
     const img = toImg(m.image);
     const mask = new Uint8Array(m.mask.buffer);
+    if (m.smart) {
+      const sm = await smartRemove(img, mask, m.quality);
+      const fin = await cleanupPass(sm.image, sm.mask, m.quality);
+      return [fin.image, { mask: fin.mask, reversed: sm.reversed }];
+    }
     const res = await inpaint(img, mask, m.quality, {});
     return [res, { mask }];
   },

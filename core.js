@@ -109,6 +109,269 @@
     return out;
   };
 
+  // Zusammenhängende Bereiche einer Maske nummerieren (4er-Nachbarschaft) -> {labels, count}
+  BT.labelComponents = function (mask, w, h) {
+    const labels = new Int32Array(w * h), stack = new Int32Array(w * h);
+    let n = 0;
+    for (let i = 0; i < w * h; i++) {
+      if (!mask[i] || labels[i]) continue;
+      n++;
+      let sp = 0; stack[sp++] = i; labels[i] = n;
+      while (sp) {
+        const j = stack[--sp], x = j % w;
+        if (x > 0 && mask[j - 1] && !labels[j - 1]) { labels[j - 1] = n; stack[sp++] = j - 1; }
+        if (x < w - 1 && mask[j + 1] && !labels[j + 1]) { labels[j + 1] = n; stack[sp++] = j + 1; }
+        if (j >= w && mask[j - w] && !labels[j - w]) { labels[j - w] = n; stack[sp++] = j - w; }
+        if (j < w * (h - 1) && mask[j + w] && !labels[j + w]) { labels[j + w] = n; stack[sp++] = j + w; }
+      }
+    }
+    return { labels, count: n };
+  };
+
+  // Mittelwertfilter (Box) auf einem Kanal, O(N) unabhängig vom Radius
+  function boxBlurChannel(src, w, h, r) {
+    const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      let acc = 0; const o = y * w;
+      for (let x = -r; x <= r; x++) acc += src[o + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        tmp[o + x] = acc / (2 * r + 1);
+        acc += src[o + Math.min(w - 1, x + r + 1)] - src[o + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        out[y * w + x] = acc / (2 * r + 1);
+        acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+      }
+    }
+    return out;
+  }
+
+  /* Kontrastverstärkte Graustufen-Variante (Hochpass). Blasse, halbtransparente Schrift
+     hebt sich darin deutlich vom Hintergrund ab und wird von der Texterkennung eher gefunden. */
+  BT.highpassVariant = function (img, k, rel) {
+    k = k || 5; rel = rel || 0.02;
+    const w = img.width, h = img.height, n = w * h, d = img.data;
+    const y = new Float32Array(n);
+    for (let i = 0; i < n; i++) y[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+    const b = boxBlurChannel(y, w, h, Math.max(2, Math.round(rel * Math.max(w, h))));
+    const out = BT.makeImage(w, h);
+    for (let i = 0; i < n; i++) {
+      const v = clamp255(128 + k * (y[i] - b[i]));
+      out.data[i * 4] = out.data[i * 4 + 1] = out.data[i * 4 + 2] = v; out.data[i * 4 + 3] = 255;
+    }
+    return out;
+  };
+
+  // ------------------------------------------- Halbtransparente Schrift zurückrechnen
+  /* Modell: Foto = a·C + (1−a)·Hintergrund  (C = Schriftfarbe, a = Deckkraft).
+     B ist eine Schätzung des Hintergrunds (die normale Rekonstruktion). Aus den Pixeln,
+     die am stärksten von B abweichen, werden a und C geschätzt. */
+  // idx: Kandidatenpixel. Ohne opt.given werden davon die 25 % mit der größten Abweichung genutzt.
+  BT.estimateOverlay = function (img, B, idx, opt) {
+    opt = opt || {};
+    const I = img.data, Bd = B.data;
+    if (idx.length < 60) return null;
+    const step = Math.max(1, Math.floor(idx.length / 150000));
+    const nrm = [], sel = [];
+    for (let k = 0; k < idx.length; k += step) {
+      const i = idx[k] * 4;
+      nrm.push(Math.abs(I[i] - Bd[i]) + Math.abs(I[i + 1] - Bd[i + 1]) + Math.abs(I[i + 2] - Bd[i + 2]));
+      sel.push(idx[k]);
+    }
+    const sorted = Float32Array.from(nrm).sort();
+    const thr = opt.given ? Math.max(15, sorted[Math.floor(sorted.length * 0.5)]) : Math.max(20, sorted[Math.floor(sorted.length * 0.75)]);
+    let cand = [], cn = [];
+    for (let k = 0; k < sel.length; k++) if (nrm[k] > thr) { cand.push(sel[k]); cn.push(nrm[k]); }
+    if (cand.length < 60) return null;
+    if (cand.length > 20000) {
+      const s = cand.length / 20000;
+      cand = Array.from({ length: 20000 }, (_, j) => cand[Math.floor(j * s)]);
+      cn = Array.from({ length: 20000 }, (_, j) => cn[Math.floor(j * s)]);
+    }
+    const m = cand.length;
+    const Ic = new Float32Array(m * 3), Bc = new Float32Array(m * 3);
+    for (let k = 0; k < m; k++) for (let c = 0; c < 3; c++) { Ic[k * 3 + c] = I[cand[k] * 4 + c]; Bc[k * 3 + c] = Bd[cand[k] * 4 + c]; }
+    const tmp = new Float32Array(m), res = new Float32Array(m);
+    const median = (arr) => { arr.sort(); return arr[arr.length >> 1]; };
+    let best = null;
+    for (let a = 0.12; a <= 0.905; a += 0.02) {
+      const C = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        for (let k = 0; k < m; k++) tmp[k] = Bc[k * 3 + c] + (Ic[k * 3 + c] - Bc[k * 3 + c]) / a;
+        C[c] = median(tmp);
+      }
+      if (C.some((v) => v < -15 || v > 270)) continue;
+      const Cc = C.map((v) => Math.max(0, Math.min(255, v)));
+      for (let k = 0; k < m; k++) {
+        let s = 0;
+        for (let c = 0; c < 3; c++) s += Math.abs(Ic[k * 3 + c] - (a * Cc[c] + (1 - a) * Bc[k * 3 + c]));
+        res[k] = s;
+      }
+      const r = median(res);
+      if (!best || r < best.resid) best = { a, C: Cc, resid: r };
+    }
+    if (!best) return null;
+    best.rel = best.resid / Math.max(1, median(Float32Array.from(cn)));
+    best.samples = m;
+    return best;
+  };
+
+  /* Kandidaten für Schriftstriche: weichen von der Rekonstruktion ab UND haben scharfe
+     Kanten in dieselbe Richtung (Hochpass). Fehler der Rekonstruktion sind meist weich. */
+  BT.hpCandidates = function (img, F, idx) {
+    const w = img.width, h = img.height, I = img.data, Fd = F.data;
+    const r = Math.max(2, Math.round(0.01 * Math.max(w, h)));
+    const ch = [0, 1, 2].map((c) => { const a = new Float32Array(w * h); for (let i = 0; i < w * h; i++) a[i] = I[i * 4 + c]; return boxBlurChannel(a, w, h, r); });
+    const nrm = new Float32Array(idx.length), al = new Float32Array(idx.length);
+    for (let k = 0; k < idx.length; k++) {
+      const i = idx[k], p = i * 4;
+      let dd = 0, dot = 0;
+      for (let c = 0; c < 3; c++) { const d = I[p + c] - Fd[p + c]; dd += d * d; dot += (I[p + c] - ch[c][i]) * d; }
+      nrm[k] = Math.sqrt(dd); al[k] = dot / (nrm[k] + 1e-6);
+    }
+    const q = (arr, f) => { const s = Float32Array.from(arr).sort(); return s[Math.min(s.length - 1, Math.floor(s.length * f))]; };
+    const t1 = Math.max(12, q(nrm, 0.6));
+    const pass = [];
+    for (let k = 0; k < idx.length; k++) if (nrm[k] > t1) pass.push(k);
+    if (pass.length < 60) return new Int32Array(0);
+    const t2 = q(pass.map((k) => al[k]), 0.7);
+    const out = [];
+    for (const k of pass) if (al[k] > t2) out.push(idx[k]);
+    return Int32Array.from(out);
+  };
+
+  // Deckungsmaske (0..1) der Schrift für die Pixel idx; Ergebnis in buf
+  BT.overlayMatte = function (img, B, idx, est, buf) {
+    const w = img.width, h = img.height, I = img.data, Bd = B.data;
+    const { a, C } = est;
+    const raw = new Float32Array(w * h);
+    for (const i of idx) {
+      const p = i * 4;
+      const v0 = C[0] - Bd[p], v1 = C[1] - Bd[p + 1], v2 = C[2] - Bd[p + 2];
+      const d0 = I[p] - Bd[p], d1 = I[p + 1] - Bd[p + 1], d2 = I[p + 2] - Bd[p + 2];
+      const vv = v0 * v0 + v1 * v1 + v2 * v2 + 1e-6;
+      let ap = (d0 * v0 + d1 * v1 + d2 * v2) / vv;
+      if (ap < 0) ap = 0; if (ap > 1.2) ap = 1.2;
+      const r0 = d0 - ap * v0, r1 = d1 - ap * v1, r2 = d2 - ap * v2;
+      if (Math.sqrt(r0 * r0 + r1 * r1 + r2 * r2) > 40) continue;
+      let t = (ap / a - 0.3) / 0.5;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      raw[i] = t * t * (3 - 2 * t);
+    }
+    const win = new Float32Array(9), out = buf || new Float32Array(w * h);
+    for (const i of idx) {
+      const x = i % w, y = (i / w) | 0;
+      let k = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const yy = Math.min(h - 1, Math.max(0, y + dy)), xx = Math.min(w - 1, Math.max(0, x + dx));
+        win[k++] = raw[yy * w + xx];
+      }
+      win.sort(); out[i] = win[4];
+    }
+    return out;
+  };
+
+  // B = Rekonstruktion; wird genutzt, wo das Zurückrechnen unplausible Farben ergäbe
+  function applyReverse(img, B, idx, est, matte, out, amax) {
+    const I = img.data, Bd = B.data, o = out.data, { a, C } = est;
+    let changed = 0;
+    for (const i of idx) {
+      const p = i * 4, ms = matte[i];
+      if (ms <= 0) { o[p] = I[p]; o[p + 1] = I[p + 1]; o[p + 2] = I[p + 2]; continue; }
+      changed++;
+      const au = Math.min(a * ms, amax), k = 1 / (1 - au);
+      const r = (I[p] - au * C[0]) * k, g = (I[p + 1] - au * C[1]) * k, b = (I[p + 2] - au * C[2]) * k;
+      if (r < -25 || g < -25 || b < -25 || r > 280 || g > 280 || b > 280) { o[p] = Bd[p]; o[p + 1] = Bd[p + 1]; o[p + 2] = Bd[p + 2]; continue; }
+      o[p] = clamp255(r); o[p + 1] = clamp255(g); o[p + 2] = clamp255(b);
+    }
+    return changed;
+  }
+
+  function groupByLabel(mask, w, h) {
+    const { labels, count } = BT.labelComponents(mask, w, h);
+    const sizes = new Int32Array(count + 2);
+    for (let i = 0; i < w * h; i++) sizes[labels[i]]++;
+    const start = new Int32Array(count + 2);
+    for (let l = 1; l <= count; l++) start[l + 1] = start[l] + sizes[l];
+    const fp = start.slice(), order = new Int32Array(w * h);
+    for (let i = 0; i < w * h; i++) if (labels[i]) order[fp[labels[i]]++] = i;
+    const groups = [];
+    for (let l = 1; l <= count; l++) groups.push(order.subarray(start[l], start[l] + sizes[l]));
+    return groups;
+  }
+
+  /* Schrift entfernen mit Rückrechnen halbtransparenter Bereiche.
+     inpaint(img, mask) -> Promise<Bild>  (normale Rekonstruktion)
+     Ablauf je Textbereich: Farbe/Deckkraft schätzen -> feine Strichmaske -> nur die Striche neu
+     rekonstruieren (genauerer Hintergrund) -> nachschätzen -> zurückrechnen. Deckende Schrift
+     und unsichere Fälle behalten die normale Rekonstruktion. */
+  BT.removeTextSmart = async function (img, mask, inpaint, opt) {
+    opt = Object.assign({ maxAlpha: 0.65, maxRel: 0.65, onStage: null }, opt || {});
+    const w = img.width, h = img.height;
+    const stage = (t) => { if (opt.onStage) opt.onStage(t); };
+    const F = await inpaint(img, mask);
+    const groups = groupByLabel(mask, w, h).filter((g) => g.length >= 200);
+    const semi = [];
+    for (const g of groups) {
+      const e = BT.estimateOverlay(img, F, BT.hpCandidates(img, F, g), { given: true });
+      if (e && e.a <= opt.maxAlpha && e.rel <= opt.maxRel) semi.push({ idx: g, est: e });
+    }
+    if (!semi.length) return { image: F, mask, reversed: 0 };
+    stage('Halbtransparente Schrift wird zurückgerechnet …');
+    // feine Strichmaske aus der ersten Schätzung
+    const buf = new Float32Array(w * h);
+    const tight = new Uint8Array(w * h);
+    for (const s of semi) {
+      BT.overlayMatte(img, F, s.idx, s.est, buf);
+      for (const i of s.idx) if (buf[i] > 0.25) tight[i] = 1;
+    }
+    const strokes = BT.maskIntersect(BT.dilate(tight, w, h, 3), mask);
+    let B = F;
+    if (BT.maskArea(strokes) > 100) {
+      B = await inpaint(img, strokes);
+      for (const s of semi) {
+        const cand = Array.from(s.idx).filter((i) => strokes[i]);
+        const e = BT.estimateOverlay(img, B, cand, { given: true });
+        if (e && e.a <= opt.maxAlpha + 0.05) s.est = e;
+      }
+    }
+    const out = BT.cloneImage(F);
+    // Textmaske: deckende Bereiche ganz, zurückgerechnete Bereiche nur die Striche
+    const textMask = new Uint8Array(mask);
+    const strokeMask = new Uint8Array(w * h);
+    let reversed = 0;
+    for (const s of semi) {
+      buf.fill(0);
+      BT.overlayMatte(img, B, s.idx, s.est, buf);
+      let hits = 0;
+      for (const i of s.idx) if (buf[i] > 0) hits++;
+      if (hits < s.idx.length * 0.02) continue;               // kaum Schrift gefunden -> Rekonstruktion behalten
+      applyReverse(img, B, s.idx, s.est, buf, out, 0.85);
+      for (const i of s.idx) { textMask[i] = 0; if (buf[i] > 0.05) strokeMask[i] = 1; }
+      s.used = true; reversed++;
+    }
+    const sm = BT.dilate(strokeMask, w, h, 2);
+    for (let i = 0; i < w * h; i++) if (sm[i] && mask[i]) textMask[i] = 1;
+    return { image: out, mask: textMask, reversed, details: semi.map((s) => ({ px: s.idx.length, a: +s.est.a.toFixed(2), C: s.est.C.map(Math.round), used: !!s.used })) };
+  };
+
+  /* Reste-Suche: nur Bereiche behalten, die überwiegend in der bisherigen Maske liegen.
+     So werden echte Bilddetails neben der Schrift (z. B. Augen, Fenster) nicht angetastet. */
+  BT.filterResidual = function (resid, mask, w, h, minOverlap) {
+    minOverlap = minOverlap == null ? 0.6 : minOverlap;
+    const out = new Uint8Array(w * h);
+    for (const g of groupByLabel(resid, w, h)) {
+      let inside = 0;
+      for (const i of g) if (mask[i]) inside++;
+      if (inside >= g.length * minOverlap) for (const i of g) out[i] = 1;
+    }
+    return out;
+  };
+
   // ---------------------------------------------------------- Texterkennung
   // Eingabe für PP-OCR-Detektion: RGB, ImageNet-Normierung, Seiten Vielfaches von 32
   BT.detInput = function (img, maxSide) {
