@@ -171,8 +171,7 @@
     layout();
     setPos(0.5);
     disableUI(false);
-    defaultHint();
-    await removeText(true);
+    setHint('Foto geladen – tippe auf „Schrift weg“ oder ein anderes Werkzeug.');
   }
 
   // ------------------------------------------------------------ Reset (leere Fläche)
