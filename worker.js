@@ -1,13 +1,11 @@
 /* Bildtransformer – KI-Worker. Läuft im Hintergrund-Thread, damit die Oberfläche flüssig bleibt.
    Alle Berechnungen passieren hier im Browser; Bilder verlassen das Gerät nie. */
-// Die Rechen-Engine (onnxruntime-web 1.30.0) liegt im App-Ordner, damit sie offline und mit mehreren Threads läuft.
-import * as ort from './ort/ort.wasm.min.mjs';
+// Die KI-Modelle selbst laufen in kurzlebigen Rechenprozessen (model-host.js), siehe ModelHost unten.
 import './core.js';
 
 const BT = self.BT;
-ort.env.wasm.wasmPaths = new URL('./ort/', self.location.href).href;
 const cores = navigator.hardwareConcurrency || 2;
-ort.env.wasm.numThreads = self.crossOriginIsolated ? (cores >= 4 ? Math.min(4, cores - 1) : cores) : 1;
+const THREADS = self.crossOriginIsolated ? (cores >= 4 ? Math.min(4, cores - 1) : cores) : 1;
 
 // Modelle werden nur einmal geladen und danach im Browser-Speicher (Cache Storage) aufbewahrt.
 const MODELS = {
@@ -33,7 +31,7 @@ const MODELS = {
   },
 };
 const MODEL_CACHE = 'bt-models-v1';
-const sessions = {};
+const hosts = {};                // key -> ModelHost (nur während eines Auftrags)
 let currentJob = 0;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
@@ -100,34 +98,23 @@ async function loadCached(key) {
 // Lädt eine URL fortsetzbar in Teilen. onProgress(got, total)
 async function downloadResumable(url, onProgress, signal) {
   const cache = await caches.open(MODEL_CACHE);
-  const fresh = () => ({ total: 0, parts: 0, bytes: 0, done: false });
-  let meta = (await readMeta(cache, url)) || fresh();
+  let meta = (await readMeta(cache, url)) || { total: 0, parts: 0, bytes: 0, done: false };
   if (meta.done) return;
-  let fails = 0, restarts = 0;
-  const restart = async () => {                        // angefangene Teile verwerfen, von vorn laden
-    await clearParts(cache, url);
-    meta = fresh();
-    if (++restarts > 3) throw new Error('Server unterstützt kein Fortsetzen');
-  };
+  let fails = 0;
   for (;;) {
-    // Komprimiert gelieferte Dateien lassen sich nicht per Range fortsetzen; ebenso ein Stand,
-    // der größer ist als die angekündigte Größe (Überbleibsel älterer Versionen) -> neu beginnen
-    if (meta.bytes && (meta.enc || (meta.total && meta.bytes > meta.total))) await restart();
     const start = meta.bytes;
     let progressed = false;
     try {
       const res = await fetch(url, { mode: 'cors', signal, headers: start ? { Range: `bytes=${start}-` } : {} });
-      const enc = (res.headers.get('content-encoding') || '').toLowerCase();
-      const encoded = !!enc && enc !== 'identity';
-      if (start && (res.status === 200 || res.status === 416 || encoded)) {   // Fortsetzen nicht möglich -> sauber neu beginnen
+      if (start && res.status === 200) {                // Server ignoriert die Fortsetzung -> sauber neu beginnen
         try { res.body.cancel(); } catch (e) { /* egal */ }
-        await restart();
+        await clearParts(cache, url);
+        meta = { total: 0, parts: 0, bytes: 0, done: false };
+        if (++fails > 2) throw new Error('Server unterstützt kein Fortsetzen');
         continue;
       }
       if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status);
-      // Bei komprimierter Lieferung ist content-length die gepackte Größe, nicht die der Datei
-      const len = encoded ? 0 : Number(res.headers.get('content-length')) || 0;
-      if (encoded) meta.enc = true;
+      const len = Number(res.headers.get('content-length')) || 0;
       if (!meta.total && len) meta.total = start + len;
       const reader = res.body.getReader();
       let cur = new Uint8Array(PART), fill = 0, last = 0;
@@ -156,13 +143,10 @@ async function downloadResumable(url, onProgress, signal) {
           fill += n; off += n;
           if (fill === PART) { await flush(false); progressed = true; }
         }
-        // Mehr Daten als angekündigt: Der Browser entpackt eine komprimierte Lieferung
-        // (bei fremden Servern ist das an den Kopfzeilen nicht erkennbar) -> Größe unbekannt
-        if (meta.total && meta.bytes + fill > meta.total) { meta.total = 0; meta.enc = true; }
         const now = Date.now();
         if (now - last > 300) { last = now; onProgress(meta.bytes + fill, meta.total); }
       }
-      if (meta.total && meta.bytes + fill < meta.total) {
+      if (meta.total && meta.bytes + fill !== meta.total) {
         await flush(false);
         throw new Error('Verbindung abgebrochen');
       }
@@ -192,7 +176,7 @@ async function ensureModel(key, report) {
     const order = st.url ? [st.url, ...m.urls.filter((u) => u !== st.url)] : m.urls;   // angefangenen Download zuerst fortsetzen
     for (const url of order) {
       try {
-        await downloadResumable(url, (got, total, retry) => report(got, Math.max(got, total || m.mb * 1e6), retry), ctrl.signal);
+        await downloadResumable(url, (got, total, retry) => report(got, total || m.mb * 1e6, retry), ctrl.signal);
         return;
       } catch (e) {
         lastErr = e;
@@ -205,13 +189,55 @@ async function ensureModel(key, report) {
   try { await promise; } finally { delete downloads[key]; }
 }
 
-async function clearModel(key) {
-  const cache = await caches.open(MODEL_CACHE);
-  for (const url of MODELS[key].urls) { await cache.delete(url); await clearParts(cache, url); }
+/* Ein Modell in seinem eigenen Rechenprozess. close() beendet den Prozess und gibt
+   dadurch den kompletten Speicher der Rechen-Engine an das Handy zurück. */
+class ModelHost {
+  constructor(key) {
+    this.key = key; this.n = 0; this.pending = new Map(); this.dead = false;
+    this.w = new Worker(new URL('./model-host.js', import.meta.url), { type: 'module' });
+    this.w.onmessage = (e) => {
+      const m = e.data;
+      if (m.ready) return;
+      const p = this.pending.get(m.id);
+      if (!p) return;
+      this.pending.delete(m.id);
+      if (m.ok) p.res(m); else p.rej(new Error(m.error));
+    };
+    this.w.onerror = (e) => {
+      if (e && e.preventDefault) e.preventDefault();
+      this.fail('Das Rechenmodul wurde beendet – vermutlich war nicht genug Arbeitsspeicher frei.');
+    };
+  }
+  fail(msg) {
+    this.dead = true;
+    for (const p of this.pending.values()) p.rej(new Error(msg));
+    this.pending.clear();
+  }
+  call(msg, transfer) {
+    if (this.dead) return Promise.reject(new Error('Rechenmodul nicht verfügbar'));
+    const id = ++this.n;
+    return new Promise((res, rej) => { this.pending.set(id, { res, rej }); this.w.postMessage(Object.assign({ id }, msg), transfer || []); });
+  }
+  async load(buf) {
+    const r = await this.call({ cmd: 'load', buffer: buf.buffer, opt: 'all' }, [buf.buffer]);
+    this.inputNames = r.inputNames; this.outputNames = r.outputNames;
+  }
+  // feeds: { name: {type, data, dims} } – Eingabepuffer werden übergeben, nicht kopiert
+  async run(feeds) {
+    const tr = Object.values(feeds).map((f) => f.data.buffer);
+    return (await this.call({ cmd: 'run', feeds }, tr)).out;
+  }
+  close() { if (!this.dead) this.fail('beendet'); this.w.terminate(); }
 }
 
-async function getSession(key, retried) {
-  if (!sessions[key]) {
+function closeHost(key) { if (hosts[key]) { hosts[key].close(); delete hosts[key]; } }
+function closeAllHosts() { for (const k of Object.keys(hosts)) closeHost(k); }
+
+async function getSession(key) {
+  if (hosts[key] && hosts[key].dead) closeHost(key);
+  if (!hosts[key]) {
+    // Immer nur ein Modell gleichzeitig im Speicher: alle anderen Rechenprozesse vorher beenden
+    for (const k of Object.keys(hosts)) if (k !== key) closeHost(k);
     let buf = await loadCached(key);
     if (!buf) {
       const m = MODELS[key];
@@ -222,74 +248,45 @@ async function getSession(key, retried) {
       if (!buf) throw new Error(`${MODELS[key].name} konnte nicht gelesen werden.`);
     }
     status(`${MODELS[key].name} wird vorbereitet …`, null);
-    try {
-      sessions[key] = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
-    } catch (e) {
-      // Datei unlesbar (z. B. durch einen fehlerhaften früheren Download): einmal neu laden.
-      // Speichermangel wird hier bewusst nicht behandelt – dafür gibt es den Rückfall auf Standard.
-      const msg = String((e && e.message) || e);
-      if (retried || !/protobuf|pars|failed to load|invalid|corrupt/i.test(msg)) throw e;
-      buf = null;
-      await clearModel(key);
-      return getSession(key, true);
-    }
+    const host = new ModelHost(key);
+    hosts[key] = host;
+    try { await host.load(buf); } catch (e) { closeHost(key); throw e; }
+    buf = null;
   }
-  return sessions[key];
-}
-
-// ---------------------------------------------------------------- Zwischenstände
-/* Während eines fortsetzbaren Auftrags wird jedes Ergebnis eines Modellaufrufs (Schriftsuche,
-   jede Kachel der Rekonstruktion) sofort auf dem Gerät gespeichert – adressiert über eine
-   Prüfsumme der Eingabe. Wird der Auftrag nach einem Abbruch wiederholt, kommen gleiche
-   Schritte direkt aus dem Speicher. Die Oberfläche löscht alles, sobald der Auftrag fertig ist. */
-let cacheOn = false;
-async function cached(kind, parts, compute) {
-  if (!cacheOn) return compute();
-  const db = await BT.resumeDb();
-  if (!db) return compute();
-  const key = kind + ':' + BT.hashData(parts);
-  try {
-    const hit = await BT.idbTx(db, 'calls', 'readonly', (s) => s.calls.get(key));
-    if (hit) return hit;
-  } catch (e) { /* dann eben neu rechnen */ }
-  const out = await compute();
-  // put() kopiert die Daten sofort; auf das Schreiben selbst muss nicht gewartet werden
-  if (cacheOn) BT.idbTx(db, 'calls', 'readwrite', (s) => s.calls.put(out, key)).catch(() => {});
-  return out;
+  return hosts[key];
 }
 
 // ---------------------------------------------------------------- KI-Schritte
-async function detectMask(img, opt) {
+// W, H: Größe der gewünschten Maske (wenn img eine verkleinerte Fassung des Fotos ist)
+async function detectMask(img, opt, W, H) {
   const det = await getSession('det');
   status('Schrift wird gesucht …', null);
   const inp = BT.detInput(img, 1280);
-  const prob = await cached(`det${inp.width}x${inp.height}`, [inp.data], async () => {
-    const out = await det.run({ [det.inputNames[0]]: new ort.Tensor('float32', inp.data, [1, 3, inp.height, inp.width]) });
-    return new Float32Array(out[det.outputNames[0]].data);
-  });
-  return BT.textMaskFromProb(prob, inp.width, inp.height, img.width, img.height, opt);
+  const out = await det.run({ [det.inputNames[0]]: { type: 'float32', data: inp.data, dims: [1, 3, inp.height, inp.width] } });
+  const prob = out[det.outputNames[0]].data;
+  return BT.textMaskFromProb(prob, inp.width, inp.height, W || img.width, H || img.height, opt);
 }
 
 function modelRunner(key, sess) {
   if (key === 'lama') {
-    return (crop, cmask) => cached(`lama${crop.width}x${crop.height}`, [crop.data, cmask], async () => {
+    return async (crop, cmask) => {
       const f = BT.lamaFeeds(crop, cmask, 512);
       const out = await sess.run({
-        [sess.inputNames[0]]: new ort.Tensor('float32', f.image, [1, 3, 512, 512]),
-        [sess.inputNames[1]]: new ort.Tensor('float32', f.mask, [1, 1, 512, 512]),
+        [sess.inputNames[0]]: { type: 'float32', data: f.image, dims: [1, 3, 512, 512] },
+        [sess.inputNames[1]]: { type: 'float32', data: f.mask, dims: [1, 1, 512, 512] },
       });
       const small = BT.fromCHW(out[sess.outputNames[0]].data, 512, 512, 1);
       return BT.resizeRGBA(small, crop.width, crop.height);
-    });
+    };
   }
-  return (crop, cmask) => cached(`migan${crop.width}x${crop.height}`, [crop.data, cmask], async () => {
+  return async (crop, cmask) => {
     const f = BT.miganFeeds(crop, cmask);
     const out = await sess.run({
-      [sess.inputNames[0]]: new ort.Tensor('uint8', f.image, [1, 3, crop.height, crop.width]),
-      [sess.inputNames[1]]: new ort.Tensor('uint8', f.mask, [1, 1, crop.height, crop.width]),
+      [sess.inputNames[0]]: { type: 'uint8', data: f.image, dims: [1, 3, crop.height, crop.width] },
+      [sess.inputNames[1]]: { type: 'uint8', data: f.mask, dims: [1, 1, crop.height, crop.width] },
     });
     return BT.fromCHW(out[sess.outputNames[0]].data, crop.width, crop.height);
-  });
+  };
 }
 
 let lamaBroken = false;
@@ -307,16 +304,23 @@ async function inpaint(img, mask, quality, opt) {
   const o = Object.assign({ win: key === 'lama' ? 768 : 1024 }, opt || {});
   o.onProgress = (i, n) => status(n > 1 ? `Bild wird rekonstruiert (${i} von ${n})` : 'Bild wird rekonstruiert …', n > 1 ? i / n : null);
   status('Bild wird rekonstruiert …', null);
-  // Gemalte Flächen (Objekt weg): als Ganzes füllen, damit große Objekte stimmig ersetzt werden
-  if (o.large) return BT.inpaintLarge(img, mask, modelRunner(key, sess), { onProgress: o.onProgress });
-  return BT.inpaintTiles(img, mask, modelRunner(key, sess), o);
+  try {
+    return await BT.inpaintTiles(img, mask, modelRunner(key, sess), o);
+  } catch (e) {
+    if (key !== 'lama') throw e;
+    // großes Modell während der Berechnung gescheitert (meist Speicher) -> Standard, ab jetzt dauerhaft
+    lamaBroken = true; closeHost('lama');
+    post({ type: 'notice', text: 'Höchste Qualität hat auf diesem Gerät nicht genug Arbeitsspeicher – es wird Standard verwendet.' });
+    return inpaint(img, mask, 'standard', opt);
+  }
 }
 
 // Suche auf dem Foto und zusätzlich auf einer kontrastverstärkten Variante (findet blasse Schrift)
 async function detectBoth(img, opt) {
-  const a = await detectMask(img, opt);
+  const small = BT.shrink(img, 1280);                     // die Erkennung arbeitet ohnehin mit max. 1280 px
+  const a = await detectMask(small, opt, img.width, img.height);
   status('Blasse Schrift wird gesucht …', null);
-  return BT.maskUnion(a, await detectMask(BT.highpassVariant(img), opt));
+  return BT.maskUnion(a, await detectMask(BT.highpassVariant(small), opt, img.width, img.height));
 }
 
 // Schrift entfernen; halbtransparente Bereiche werden zurückgerechnet statt neu erfunden
@@ -328,7 +332,7 @@ async function smartRemove(img, mask, quality) {
 async function cleanupPass(res, mask, quality) {
   const W = res.width, H = res.height;
   const zone = BT.dilate(mask, W, H, Math.max(2, Math.round(0.004 * Math.max(W, H))));
-  const resid = BT.filterResidual(await detectMask(res, { thresh: 0.25, boxThresh: 0.4 }), zone, W, H, 0.6);
+  const resid = BT.filterResidual(await detectMask(BT.shrink(res, 1280), { thresh: 0.25, boxThresh: 0.4 }, W, H), zone, W, H, 0.6);
   if (BT.maskArea(resid) === 0) return { image: res, mask };
   status('Reste werden entfernt …', null);
   const out = await inpaint(res, resid, quality, { shift: 0.5 });
@@ -394,15 +398,13 @@ const handlers = {
   },
   async inpaintMask(m) {
     const img = toImg(m.image);
-    let mask = new Uint8Array(m.mask.buffer);
-    // Pinselstriche: eingekreiste Flächen mitfüllen, schmalen Rand ergänzen
-    if (m.brush) { status('Markierung wird vorbereitet …', null); mask = BT.prepareBrushMask(mask, img.width, img.height); }
+    const mask = new Uint8Array(m.mask.buffer);
     if (m.smart) {
       const sm = await smartRemove(img, mask, m.quality);
       const fin = await cleanupPass(sm.image, sm.mask, m.quality);
       return [fin.image, { mask: fin.mask, reversed: sm.reversed }];
     }
-    const res = await inpaint(img, mask, m.quality, { large: !!m.brush });
+    const res = await inpaint(img, mask, m.quality, {});
     return [res, { mask }];
   },
   async filter(m) {
@@ -413,20 +415,20 @@ const handlers = {
 
 self.onmessage = async (e) => {
   const m = e.data;
-  const background = ['modelStatus', 'download', 'cancelDownload'].includes(m.cmd);
-  if (!background) { currentJob = m.id; cacheOn = !!m.resume; }
+  if (!['modelStatus', 'download', 'cancelDownload'].includes(m.cmd)) currentJob = m.id;
   try {
     const h = handlers[m.cmd];
     if (!h) throw new Error('Unbekannter Auftrag: ' + m.cmd);
     let fellBack = false;
-    if (m.quality === 'high' && !sessions.lama && !(await modelState('lama')).done) { m.quality = 'standard'; fellBack = true; }
+    if (m.quality === 'high' && (lamaBroken || !(await modelState('lama')).done)) { m.quality = 'standard'; fellBack = true; }
     const [img, extra] = await h(m);
     if (fellBack) extra.fellBack = true;
     reply(m.id, img, extra);
   } catch (err) {
     post({ type: 'error', id: m.id, message: (err && err.message) || String(err) });
   } finally {
-    if (!background && currentJob === m.id) cacheOn = false;
+    // nach jeder KI-Bearbeitung alle Rechenprozesse beenden -> Speicher sofort wieder frei
+    if (['removeText', 'improve', 'inpaintMask', 'warmup'].includes(m.cmd)) closeAllHosts();
   }
 };
-post({ type: 'ready', threads: ort.env.wasm.numThreads, isolated: self.crossOriginIsolated });
+post({ type: 'ready', threads: THREADS, isolated: self.crossOriginIsolated });

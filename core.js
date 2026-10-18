@@ -99,58 +99,56 @@
     return { dist, lab };
   }
 
-  // Maske um r Pixel erweitern (O(N), unabhängig von r)
-  BT.dilate = function (mask, w, h, r) {
-    if (r <= 0) return new Uint8Array(mask);
-    const { dist } = chamfer(mask, w, h);
-    const out = new Uint8Array(w * h);
-    const lim = r * 3;
-    for (let i = 0; i < w * h; i++) out[i] = dist[i] <= lim ? 1 : 0;
-    return out;
+  // Begrenzungsrechteck der gesetzten Pixel (oder null)
+  BT.maskBBox = function (mask, w, h) {
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) {
+      const o = y * w;
+      for (let x = 0; x < w; x++) if (mask[o + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    }
+    return x1 < 0 ? null : { x0, y0, x1, y1 };
   };
 
-  /* Pinselmaske für „Objekt weg“ / „Nachmalen“ aufbereiten:
-     1. Eingekreiste Flächen werden mitgefüllt – wer einen Kreis um ein Objekt malt, meint den Inhalt,
-        nicht nur die Linie. Kleine Lücken im Kreis (bis ca. 3 % der Bildkante) werden dabei geschlossen.
-     2. Ein schmaler Rand kommt dazu, damit Kanten, Schatten und Kantenglättung des Objekts mit verschwinden. */
-  BT.prepareBrushMask = function (mask, w, h) {
-    const n = w * h, side = Math.max(w, h), gap = Math.max(4, Math.round(0.015 * side));
-    const closed = BT.dilate(mask, w, h, gap);
-    // Alles, was vom Bildrand aus erreichbar ist, ohne die (geschlossene) Linie zu kreuzen, ist „außen“
-    const outside = new Uint8Array(n), stack = new Int32Array(n);
-    let sp = 0;
-    const push = (i) => { if (!closed[i] && !outside[i]) { outside[i] = 1; stack[sp++] = i; } };
-    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
-    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
-    while (sp) {
-      const j = stack[--sp], x = j % w;
-      if (x > 0) push(j - 1);
-      if (x < w - 1) push(j + 1);
-      if (j >= w) push(j - w);
-      if (j < n - w) push(j + w);
+  /* Maske um r Pixel erweitern (Chamfer-Distanz). Gerechnet wird nur im Rechteck um die Maske
+     und mit 16-Bit-Werten – das spart bei großen Fotos mehrere hundert MB Arbeitsspeicher. */
+  BT.dilate = function (mask, w, h, r) {
+    const out = new Uint8Array(mask);
+    if (r <= 0) return out;
+    const bb = BT.maskBBox(mask, w, h);
+    if (!bb) return out;
+    const x0 = Math.max(0, bb.x0 - r), y0 = Math.max(0, bb.y0 - r), x1 = Math.min(w - 1, bb.x1 + r), y1 = Math.min(h - 1, bb.y1 + r);
+    const cw = x1 - x0 + 1, ch = y1 - y0 + 1, lim = r * 3, CAP = Math.min(65535, lim + 8);
+    const d = new Uint16Array(cw * ch);
+    for (let y = 0; y < ch; y++) { const o = (y0 + y) * w + x0, q = y * cw; for (let x = 0; x < cw; x++) d[q + x] = mask[o + x] ? 0 : CAP; }
+    const relax = (i, j, c) => { const v = d[j] + c; if (v < d[i]) d[i] = v; };
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      const i = y * cw + x;
+      if (x > 0) relax(i, i - 1, 3);
+      if (y > 0) { relax(i, i - cw, 3); if (x > 0) relax(i, i - cw - 1, 4); if (x < cw - 1) relax(i, i - cw + 1, 4); }
     }
-    /* „Außen“ wieder bis an die Linie heranführen. Innen ist dann alles, was weder Linie noch außen ist –
-       auch ein schmales Inneres, das beim Schließen ganz zugelaufen wäre (dicker Pinsel, enger Kreis). */
-    const near = BT.dilate(outside, w, h, gap + 2);
-    const full = new Uint8Array(mask);
-    for (let i = 0; i < n; i++) if (!mask[i] && !near[i]) full[i] = 1;
-    return BT.dilate(full, w, h, Math.max(2, Math.round(0.004 * side)));
+    for (let y = ch - 1; y >= 0; y--) for (let x = cw - 1; x >= 0; x--) {
+      const i = y * cw + x;
+      if (x < cw - 1) relax(i, i + 1, 3);
+      if (y < ch - 1) { relax(i, i + cw, 3); if (x < cw - 1) relax(i, i + cw + 1, 4); if (x > 0) relax(i, i + cw - 1, 4); }
+    }
+    for (let y = 0; y < ch; y++) { const o = (y0 + y) * w + x0, q = y * cw; for (let x = 0; x < cw; x++) if (d[q + x] <= lim) out[o + x] = 1; }
+    return out;
   };
 
   // Zusammenhängende Bereiche einer Maske nummerieren (4er-Nachbarschaft) -> {labels, count}
   BT.labelComponents = function (mask, w, h) {
-    const labels = new Int32Array(w * h), stack = new Int32Array(w * h);
+    const labels = new Int32Array(w * h), stack = [];
     let n = 0;
     for (let i = 0; i < w * h; i++) {
       if (!mask[i] || labels[i]) continue;
       n++;
-      let sp = 0; stack[sp++] = i; labels[i] = n;
-      while (sp) {
-        const j = stack[--sp], x = j % w;
-        if (x > 0 && mask[j - 1] && !labels[j - 1]) { labels[j - 1] = n; stack[sp++] = j - 1; }
-        if (x < w - 1 && mask[j + 1] && !labels[j + 1]) { labels[j + 1] = n; stack[sp++] = j + 1; }
-        if (j >= w && mask[j - w] && !labels[j - w]) { labels[j - w] = n; stack[sp++] = j - w; }
-        if (j < w * (h - 1) && mask[j + w] && !labels[j + w]) { labels[j + w] = n; stack[sp++] = j + w; }
+      stack.push(i); labels[i] = n;
+      while (stack.length) {
+        const j = stack.pop(), x = j % w;
+        if (x > 0 && mask[j - 1] && !labels[j - 1]) { labels[j - 1] = n; stack.push(j - 1); }
+        if (x < w - 1 && mask[j + 1] && !labels[j + 1]) { labels[j + 1] = n; stack.push(j + 1); }
+        if (j >= w && mask[j - w] && !labels[j - w]) { labels[j - w] = n; stack.push(j - w); }
+        if (j < w * (h - 1) && mask[j + w] && !labels[j + w]) { labels[j + w] = n; stack.push(j + w); }
       }
     }
     return { labels, count: n };
@@ -180,6 +178,10 @@
 
   /* Kontrastverstärkte Graustufen-Variante (Hochpass). Blasse, halbtransparente Schrift
      hebt sich darin deutlich vom Hintergrund ab und wird von der Texterkennung eher gefunden. */
+  BT.shrink = function (img, maxSide) {
+    const s = Math.min(1, maxSide / Math.max(img.width, img.height));
+    return s >= 1 ? img : BT.resizeRGBA(img, Math.max(1, Math.round(img.width * s)), Math.max(1, Math.round(img.height * s)));
+  };
   BT.highpassVariant = function (img, k, rel) {
     k = k || 5; rel = rel || 0.02;
     const w = img.width, h = img.height, n = w * h, d = img.data;
@@ -252,13 +254,22 @@
      Kanten in dieselbe Richtung (Hochpass). Fehler der Rekonstruktion sind meist weich. */
   BT.hpCandidates = function (img, F, idx) {
     const w = img.width, h = img.height, I = img.data, Fd = F.data;
+    if (!idx.length) return new Int32Array(0);
     const r = Math.max(2, Math.round(0.01 * Math.max(w, h)));
-    const ch = [0, 1, 2].map((c) => { const a = new Float32Array(w * h); for (let i = 0; i < w * h; i++) a[i] = I[i * 4 + c]; return boxBlurChannel(a, w, h, r); });
+    // nur das Rechteck um die Gruppe (+ Filterradius) weichzeichnen, nicht das ganze Foto
+    let bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+    for (const i of idx) { const x = i % w, y = (i / w) | 0; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+    const x0 = Math.max(0, bx0 - r), y0 = Math.max(0, by0 - r), cw = Math.min(w - 1, bx1 + r) - x0 + 1, chh = Math.min(h - 1, by1 + r) - y0 + 1;
+    const ch = [0, 1, 2].map((c) => {
+      const a = new Float32Array(cw * chh);
+      for (let y = 0; y < chh; y++) { const o = ((y0 + y) * w + x0) * 4 + c, q = y * cw; for (let x = 0; x < cw; x++) a[q + x] = I[o + x * 4]; }
+      return boxBlurChannel(a, cw, chh, r);
+    });
     const nrm = new Float32Array(idx.length), al = new Float32Array(idx.length);
     for (let k = 0; k < idx.length; k++) {
-      const i = idx[k], p = i * 4;
+      const i = idx[k], p = i * 4, li = (((i / w) | 0) - y0) * cw + (i % w) - x0;
       let dd = 0, dot = 0;
-      for (let c = 0; c < 3; c++) { const d = I[p + c] - Fd[p + c]; dd += d * d; dot += (I[p + c] - ch[c][i]) * d; }
+      for (let c = 0; c < 3; c++) { const d = I[p + c] - Fd[p + c]; dd += d * d; dot += (I[p + c] - ch[c][li]) * d; }
       nrm[k] = Math.sqrt(dd); al[k] = dot / (nrm[k] + 1e-6);
     }
     const q = (arr, f) => { const s = Float32Array.from(arr).sort(); return s[Math.min(s.length - 1, Math.floor(s.length * f))]; };
@@ -272,11 +283,17 @@
     return Int32Array.from(out);
   };
 
-  // Deckungsmaske (0..1) der Schrift für die Pixel idx; Ergebnis in buf
-  BT.overlayMatte = function (img, B, idx, est, buf) {
+  // Deckungsmaske (0..1) der Schrift; Ergebnis[k] gehört zu Pixel idx[k]
+  BT.overlayMatte = function (img, B, idx, est) {
     const w = img.width, h = img.height, I = img.data, Bd = B.data;
     const { a, C } = est;
-    const raw = new Float32Array(w * h);
+    let bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+    for (const i of idx) { const x = i % w, y = (i / w) | 0; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+    const out = new Float32Array(idx.length);
+    if (bx1 < 0) return out;
+    const rw = bx1 - bx0 + 1, rh = by1 - by0 + 1;
+    const raw = new Float32Array(rw * rh);
+    const at = (x, y) => (x < bx0 || x > bx1 || y < by0 || y > by1 ? 0 : raw[(y - by0) * rw + x - bx0]);
     for (const i of idx) {
       const p = i * 4;
       const v0 = C[0] - Bd[p], v1 = C[1] - Bd[p + 1], v2 = C[2] - Bd[p + 2];
@@ -288,17 +305,16 @@
       if (Math.sqrt(r0 * r0 + r1 * r1 + r2 * r2) > 40) continue;
       let t = (ap / a - 0.3) / 0.5;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
-      raw[i] = t * t * (3 - 2 * t);
+      raw[(((i / w) | 0) - by0) * rw + (i % w) - bx0] = t * t * (3 - 2 * t);
     }
-    const win = new Float32Array(9), out = buf || new Float32Array(w * h);
-    for (const i of idx) {
-      const x = i % w, y = (i / w) | 0;
+    const win = new Float32Array(9);
+    for (let n = 0; n < idx.length; n++) {
+      const i = idx[n], x = i % w, y = (i / w) | 0;
       let k = 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-        const yy = Math.min(h - 1, Math.max(0, y + dy)), xx = Math.min(w - 1, Math.max(0, x + dx));
-        win[k++] = raw[yy * w + xx];
+        win[k++] = at(Math.min(w - 1, Math.max(0, x + dx)), Math.min(h - 1, Math.max(0, y + dy)));
       }
-      win.sort(); out[i] = win[4];
+      win.sort(); out[n] = win[4];
     }
     return out;
   };
@@ -307,8 +323,8 @@
   function applyReverse(img, B, idx, est, matte, out, amax) {
     const I = img.data, Bd = B.data, o = out.data, { a, C } = est;
     let changed = 0;
-    for (const i of idx) {
-      const p = i * 4, ms = matte[i];
+    for (let n = 0; n < idx.length; n++) {
+      const i = idx[n], p = i * 4, ms = matte[n];
       if (ms <= 0) { o[p] = I[p]; o[p + 1] = I[p + 1]; o[p + 2] = I[p + 2]; continue; }
       changed++;
       const au = Math.min(a * ms, amax), k = 1 / (1 - au);
@@ -319,16 +335,24 @@
     return changed;
   }
 
+  // Zusammenhängende Bereiche als Pixel-Listen (nur 1 Byte je Bildpunkt Zusatzspeicher)
   function groupByLabel(mask, w, h) {
-    const { labels, count } = BT.labelComponents(mask, w, h);
-    const sizes = new Int32Array(count + 2);
-    for (let i = 0; i < w * h; i++) sizes[labels[i]]++;
-    const start = new Int32Array(count + 2);
-    for (let l = 1; l <= count; l++) start[l + 1] = start[l] + sizes[l];
-    const fp = start.slice(), order = new Int32Array(w * h);
-    for (let i = 0; i < w * h; i++) if (labels[i]) order[fp[labels[i]]++] = i;
-    const groups = [];
-    for (let l = 1; l <= count; l++) groups.push(order.subarray(start[l], start[l] + sizes[l]));
+    const seen = new Uint8Array(w * h), groups = [], stack = [];
+    for (let i = 0; i < w * h; i++) {
+      if (!mask[i] || seen[i]) continue;
+      const g = [];
+      stack.push(i); seen[i] = 1;
+      while (stack.length) {
+        const j = stack.pop(), x = j % w;
+        g.push(j);
+        if (x > 0 && mask[j - 1] && !seen[j - 1]) { seen[j - 1] = 1; stack.push(j - 1); }
+        if (x < w - 1 && mask[j + 1] && !seen[j + 1]) { seen[j + 1] = 1; stack.push(j + 1); }
+        if (j >= w && mask[j - w] && !seen[j - w]) { seen[j - w] = 1; stack.push(j - w); }
+        if (j < w * (h - 1) && mask[j + w] && !seen[j + w]) { seen[j + w] = 1; stack.push(j + w); }
+      }
+      g.sort((a, b) => a - b);
+      groups.push(Int32Array.from(g));
+    }
     return groups;
   }
 
@@ -351,11 +375,10 @@
     if (!semi.length) return { image: F, mask, reversed: 0 };
     stage('Halbtransparente Schrift wird zurückgerechnet …');
     // feine Strichmaske aus der ersten Schätzung
-    const buf = new Float32Array(w * h);
     const tight = new Uint8Array(w * h);
     for (const s of semi) {
-      BT.overlayMatte(img, F, s.idx, s.est, buf);
-      for (const i of s.idx) if (buf[i] > 0.25) tight[i] = 1;
+      const mt = BT.overlayMatte(img, F, s.idx, s.est);
+      for (let n = 0; n < s.idx.length; n++) if (mt[n] > 0.25) tight[s.idx[n]] = 1;
     }
     const strokes = BT.maskIntersect(BT.dilate(tight, w, h, 3), mask);
     let B = F;
@@ -367,19 +390,18 @@
         if (e && e.a <= opt.maxAlpha + 0.05) s.est = e;
       }
     }
-    const out = BT.cloneImage(F);
+    const out = F;                                             // Ergebnis direkt in die Rekonstruktion schreiben (keine Kopie)
     // Textmaske: deckende Bereiche ganz, zurückgerechnete Bereiche nur die Striche
     const textMask = new Uint8Array(mask);
     const strokeMask = new Uint8Array(w * h);
     let reversed = 0;
     for (const s of semi) {
-      buf.fill(0);
-      BT.overlayMatte(img, B, s.idx, s.est, buf);
+      const mt = BT.overlayMatte(img, B, s.idx, s.est);
       let hits = 0;
-      for (const i of s.idx) if (buf[i] > 0) hits++;
+      for (let n = 0; n < mt.length; n++) if (mt[n] > 0) hits++;
       if (hits < s.idx.length * 0.02) continue;               // kaum Schrift gefunden -> Rekonstruktion behalten
-      applyReverse(img, B, s.idx, s.est, buf, out, 0.85);
-      for (const i of s.idx) { textMask[i] = 0; if (buf[i] > 0.05) strokeMask[i] = 1; }
+      applyReverse(img, B, s.idx, s.est, mt, out, 0.85);
+      for (let n = 0; n < s.idx.length; n++) { const i = s.idx[n]; textMask[i] = 0; if (mt[n] > 0.05) strokeMask[i] = 1; }
       s.used = true; reversed++;
     }
     const sm = BT.dilate(strokeMask, w, h, 2);
@@ -458,8 +480,18 @@
     const { dist, lab } = chamfer(seed, pw, ph);
     const small = new Float32Array(n);
     for (let i = 0; i < n; i++) small[i] = lab[i] && dist[i] <= grows[lab[i]] * 3 ? 1 : 0;
-    const up = BT.resizeGray(small, pw, ph, W, H);
-    for (let i = 0; i < W * H; i++) out[i] = up[i] >= 0.5 ? 1 : 0;
+    const sx = pw / W, sy = ph / H;
+    for (let y = 0; y < H; y++) {
+      let fy = (y + 0.5) * sy - 0.5; if (fy < 0) fy = 0;
+      const y0 = Math.min(ph - 1, fy | 0), y1 = Math.min(ph - 1, y0 + 1), wy = fy - y0;
+      for (let x = 0; x < W; x++) {
+        let fx = (x + 0.5) * sx - 0.5; if (fx < 0) fx = 0;
+        const x0 = Math.min(pw - 1, fx | 0), x1 = Math.min(pw - 1, x0 + 1), wx = fx - x0;
+        const top = small[y0 * pw + x0] + (small[y0 * pw + x1] - small[y0 * pw + x0]) * wx;
+        const bot = small[y1 * pw + x0] + (small[y1 * pw + x1] - small[y1 * pw + x0]) * wx;
+        if (top + (bot - top) * wy >= 0.5) out[y * W + x] = 1;
+      }
+    }
     const r = Math.max(2, Math.round(opt.pad * Math.max(W, H)));
     return BT.dilate(out, W, H, r);
   };
@@ -507,66 +539,6 @@
         todo[gi] = 0;
       }
       if (opt.onProgress) opt.onProgress(t + 1, tiles.length);
-    }
-    return out;
-  };
-
-  /* Große Flächen (z. B. ein eingekreistes Objekt) als Ganzes füllen statt kachelweise: Bei großen Löchern
-     hätten einzelne Kacheln kaum Bezug zur Umgebung, und das Modell erfindet Fantasie-Strukturen.
-     Je zusammenhängender Fläche wird ein Ausschnitt mit reichlich Umgebung so verkleinert, dass das Loch
-     höchstens ca. 64 px dick ist (Arbeitsgröße 512–1024 px), in einem Durchgang gefüllt und wieder vergrößert.
-     Kleine Flächen bleiben dabei in voller Auflösung. */
-  BT.inpaintLarge = async function (img, mask, runModel, opt) {
-    opt = Object.assign({ minSide: 512, maxSide: 1024, thick: 64, onProgress: null }, opt || {});
-    const W = img.width, H = img.height, n = W * H;
-    const out = BT.cloneImage(img);
-    const { labels, count } = BT.labelComponents(mask, W, H);
-    if (!count) return out;
-    // Dicke je Fläche: größter Abstand eines Lochpixels zum nächsten bekannten Pixel
-    const inv = new Uint8Array(n);
-    for (let i = 0; i < n; i++) inv[i] = mask[i] ? 0 : 1;
-    const { dist } = chamfer(inv, W, H);
-    const box = [];
-    for (let k = 0; k <= count; k++) box.push({ x0: W, y0: H, x1: -1, y1: -1, t: 0 });
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const l = labels[y * W + x];
-      if (!l) continue;
-      const b = box[l];
-      if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x; if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y;
-      const d = dist[y * W + x] / 3; if (d > b.t) b.t = d;
-    }
-    const todo = new Uint8Array(mask);
-    for (let k = 1; k <= count; k++) {
-      const b = box[k];
-      const pad = Math.max(64, Math.round(0.5 * Math.max(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1)));
-      const cx0 = Math.max(0, b.x0 - pad), cy0 = Math.max(0, b.y0 - pad);
-      const cx1 = Math.min(W - 1, b.x1 + pad), cy1 = Math.min(H - 1, b.y1 + pad);
-      const cw = cx1 - cx0 + 1, ch = cy1 - cy0 + 1, M = Math.max(cw, ch);
-      const s = Math.min(1, opt.maxSide / M, Math.max(opt.minSide / M, opt.thick / Math.max(1, b.t)));
-      const sw = Math.max(16, Math.round(cw * s)), sh = Math.max(16, Math.round(ch * s));
-      const cImg = BT.cropImage(out, cx0, cy0, cw, ch);
-      const cMask = new Uint8Array(cw * ch);
-      let any = false;
-      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) if (todo[(cy0 + y) * W + cx0 + x]) { cMask[y * cw + x] = 1; any = true; }
-      if (any) {
-        let res;
-        if (s >= 1) res = await runModel(BT.prefill(cImg, cMask), cMask);
-        else {
-          const sm = BT.resizeGray(cMask, cw, ch, sw, sh);
-          const sMask = new Uint8Array(sw * sh);
-          for (let i = 0; i < sw * sh; i++) sMask[i] = sm[i] > 0.01 ? 1 : 0;
-          const small = BT.resizeRGBA(BT.prefill(cImg, cMask), sw, sh);
-          res = BT.resizeRGBA(await runModel(BT.prefill(small, sMask), sMask), cw, ch);
-        }
-        for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
-          const gi = (cy0 + y) * W + cx0 + x;
-          if (!todo[gi]) continue;
-          const li = (y * cw + x) * 4, go = gi * 4;
-          out.data[go] = res.data[li]; out.data[go + 1] = res.data[li + 1]; out.data[go + 2] = res.data[li + 2];
-          todo[gi] = 0;
-        }
-      }
-      if (opt.onProgress) opt.onProgress(k, count);
     }
     return out;
   };
@@ -865,74 +837,6 @@
       case 'hue': return BT.hueFilter(img, a.hue, a.mode);
     }
     return img;
-  };
-
-  // ---------------------------------------------------------------- Fortsetzen nach Abbruch
-  /* Datenbank "bt-resume" (nur auf dem Gerät):
-     - job:   der laufende Auftrag (Foto, Markierung, Art) – solange er läuft
-     - calls: Ergebnisse einzelner Rechenschritte, adressiert über eine Prüfsumme ihrer Eingabe.
-       Wird ein Auftrag nach einem Abbruch wiederholt, liefern gleiche Eingaben das gespeicherte
-       Ergebnis sofort – abweichende Eingaben werden einfach neu berechnet. */
-  BT.resumeDb = function () {
-    if (BT._rdb) return BT._rdb;
-    BT._rdb = new Promise((resolve) => {
-      let r;
-      try { r = indexedDB.open('bt-resume', 1); } catch (e) { resolve(null); return; }
-      r.onupgradeneeded = () => {
-        const db = r.result;
-        if (!db.objectStoreNames.contains('job')) db.createObjectStore('job');
-        if (!db.objectStoreNames.contains('calls')) db.createObjectStore('calls');
-      };
-      r.onsuccess = () => { const db = r.result; db.onversionchange = () => db.close(); resolve(db); };
-      r.onerror = () => resolve(null);
-      r.onblocked = () => resolve(null);
-    });
-    return BT._rdb;
-  };
-  /* Eine Transaktion; fn(stores) stellt Anfragen, das Ergebnis der letzten zurückgegebenen
-     Anfrage wird nach dem Abschluss geliefert. */
-  BT.idbTx = function (db, names, mode, fn) {
-    return new Promise((resolve, reject) => {
-      let tx;
-      try { tx = db.transaction(names, mode); } catch (e) { reject(e); return; }
-      const stores = {};
-      for (const n of [].concat(names)) stores[n] = tx.objectStore(n);
-      let val, req;
-      try { req = fn(stores); } catch (e) { try { tx.abort(); } catch (x) { /* schon beendet */ } reject(e); return; }
-      if (req) req.onsuccess = () => { val = req.result; };
-      tx.oncomplete = () => resolve(val);
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error('abgebrochen'));
-    });
-  };
-  // Zwei unabhängige 32-Bit-Prüfsummen (Murmur3-Mischung) über mehrere Byte-Folgen
-  BT.hashData = function (parts) {
-    let h1 = 0x2f9a3c71 | 0, h2 = 0x6b43a9b5 | 0;
-    const mix = (h, k, c1, c2) => {
-      k = Math.imul(k, c1); k = (k << 15) | (k >>> 17); k = Math.imul(k, c2);
-      h ^= k; h = (h << 13) | (h >>> 19);
-      return (Math.imul(h, 5) + 0xe6546b64) | 0;
-    };
-    for (const p of parts) {
-      const u8 = p instanceof Uint8Array || p instanceof Uint8ClampedArray ? p : new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
-      const n4 = u8.byteOffset % 4 === 0 ? u8.length >> 2 : 0;
-      if (n4) {
-        const u32 = new Uint32Array(u8.buffer, u8.byteOffset, n4);
-        for (let i = 0; i < n4; i++) {
-          const k = u32[i];
-          h1 = mix(h1, k, 0xcc9e2d51, 0x1b873593);
-          h2 = mix(h2, k, 0x85ebca6b, 0xc2b2ae35);
-        }
-      }
-      for (let i = n4 * 4; i < u8.length; i++) {
-        h1 = mix(h1, u8[i], 0xcc9e2d51, 0x1b873593);
-        h2 = mix(h2, u8[i], 0x85ebca6b, 0xc2b2ae35);
-      }
-      h1 = mix(h1, u8.length, 0xcc9e2d51, 0x1b873593);
-      h2 = mix(h2, u8.length, 0x85ebca6b, 0xc2b2ae35);
-    }
-    const fin = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return (h >>> 0).toString(36); };
-    return fin(h1) + '-' + fin(h2);
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = BT;
