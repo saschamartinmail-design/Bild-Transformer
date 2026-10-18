@@ -3,7 +3,7 @@
    - setzt die Header für "Cross-Origin Isolation", damit die KI mehrere Prozessorkerne nutzen kann
    - nimmt Fotos aus dem Android-Teilen-Menü entgegen
    KI-Modelle (.onnx) verwaltet worker.js selbst im Cache "bt-models-v1". */
-const VERSION = 'bt-app-v5';
+const VERSION = 'bt-app-v6';
 const SHELL = [
   './', './index.html', './app.js', './worker.js', './core.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png',

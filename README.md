@@ -30,6 +30,7 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 | Kommandos | freie Sätze wie „etwas wärmer und das Rot raus“, „deutlich heller, mehr Kontrast“, „nur Blau behalten“, „Gelbstich entfernen“, „Retro-Look“, „rückgängig“, „zurück zum Original“ |
 | Qualität | Standard (MI-GAN, schnell) oder Höchste Qualität (LaMa, einmalig 208 MB, langsamer) unter „Mehr“ |
 | Reset | schließt das aktuelle Foto und zeigt wieder die leere Fläche (mit Rückfrage, wenn schon bearbeitet wurde) |
+| Bildschirm | bleibt an, solange gerechnet wird; die Ausschalttaste schaltet ihn trotzdem jederzeit aus |
 
 ## Aufbau
 
@@ -54,6 +55,7 @@ Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wi
 - Fotos über 4096 Pixel Kantenlänge werden auf 4096 verkleinert.
 - Das Kommandofeld versteht die eingebauten Werkzeuge. Echtes Neu-Malen („Himmel als Sonnenuntergang“) ist nicht enthalten.
 - „Höchste Qualität“ braucht viel Arbeitsspeicher; auf älteren Handys kann es abbrechen – dann auf Standard zurückstellen.
+- Im Hintergrund (Bildschirm per Taste aus oder andere App geöffnet) rechnet die App nur eingeschränkt weiter: Chrome drosselt sie, friert sie nach einigen Minuten ein, und bei Speichermangel kann Android sie beenden.
 
 ## Drittanbieter
 

@@ -110,12 +110,38 @@
     el.undoBtn.disabled = b || state.history.length === 0;
     el.brushApply.disabled = b; el.brushCancel.disabled = b;
   }
+  // ------------------------------------------------------------ Bildschirm anlassen
+  // Solange gerechnet wird, schaltet sich das Display nicht von selbst ab.
+  // Die Ausschalttaste wirkt weiterhin normal; danach gibt der Browser die Sperre frei.
+  // Kommt man zurück und es wird noch gerechnet, wird sie neu angefordert.
+  const screenLock = {
+    sentinel: null,
+    async on() {
+      if (!('wakeLock' in navigator) || this.sentinel || document.visibilityState !== 'visible') return;
+      try {
+        const s = await navigator.wakeLock.request('screen');
+        if (!state.busy) { s.release().catch(() => {}); return; }   // Berechnung war schon fertig
+        this.sentinel = s;
+        s.addEventListener('release', () => { if (this.sentinel === s) this.sentinel = null; });
+      } catch (e) { /* z. B. Energiesparmodus: dann eben ohne */ }
+    },
+    off() {
+      const s = this.sentinel;
+      this.sentinel = null;
+      if (s) s.release().catch(() => {});
+    },
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.busy) screenLock.on();
+  });
+
   async function run(label, fn) {
     if (state.busy) return undefined;
     state.busy = true;
     hideSave();
     setBusy(label, null);
     disableUI(true);
+    screenLock.on();
     try {
       const r = await fn();
       return r === undefined ? true : r;
@@ -124,6 +150,7 @@
       return undefined;
     } finally {
       state.busy = false;
+      screenLock.off();
       el.busy.hidden = true;
       disableUI(false);
     }
