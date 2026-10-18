@@ -17,6 +17,8 @@
     chat: $('chat'), cmdForm: $('cmdForm'), cmd: $('cmd'),
     moreDlg: $('moreDlg'), moreClose: $('moreClose'), qualityToggle: $('qualityToggle'), engineInfo: $('engineInfo'),
     qualityDlg: $('qualityDlg'), qStd: $('qStd'), qHigh: $('qHigh'),
+    hqInfo: $('hqInfo'), hqBar: $('hqBar'), hqBarWrap: $('hqBarWrap'), hqLoad: $('hqLoad'), storageInfo: $('storageInfo'),
+    dataDlg: $('dataDlg'), dataText: $('dataText'), dataWifi: $('dataWifi'), dataNow: $('dataNow'),
   };
   const ctxO = el.cvOrig.getContext('2d', { willReadFrequently: true });
   const ctxR = el.cvResult.getContext('2d', { willReadFrequently: true });
@@ -32,6 +34,8 @@
     pos: 0.5, history: [], text: null, busy: false,
     mode: 'compare', brushKind: null, pickMode: 'remove',
     quality: store.get('bt-quality'),
+    hq: { done: false, got: 0, total: 208e6, active: false, error: null, waitWifi: false, text: '' },
+    fbNoted: false,
   };
 
   // ------------------------------------------------------------ Worker
@@ -42,6 +46,9 @@
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === 'progress') { if (pending.has(m.job)) setBusy(m.text, m.frac); return; }
+    if (m.type === 'dl') { onDownload(m); return; }
+    if (m.type === 'notice') { addMsg('ai', m.text); return; }
+    if (m.fellBack) noteFallback();
     if (m.type === 'ready') {
       el.engineInfo.textContent = `Rechenkern bereit · ${m.threads} Thread${m.threads > 1 ? 's' : ''}${m.isolated ? '' : ' (Einzelthread-Modus)'}`;
       return;
@@ -224,11 +231,110 @@
     return { found };
   }
 
+  // ------------------------------------------------------------ Modell „Höchste Qualität“
+  const mb = (v) => Math.round((v || 0) / 1e6);
+  function isCellular() { const c = navigator.connection; return !!(c && (c.type === 'cellular' || c.saveData)); }
+  async function refreshHQ() {
+    try {
+      const st = await call('modelStatus', { model: 'lama' });
+      Object.assign(state.hq, { done: st.done, got: st.got, total: st.total || state.hq.total, active: st.active });
+    } catch (e) { /* Worker nicht bereit */ }
+    renderHQ();
+  }
+  function renderHQ() {
+    const h = state.hq;
+    let t;
+    if (h.done) t = `Höchste Qualität: auf dem Gerät gespeichert (${mb(h.total)} MB) – wird nicht erneut geladen.`;
+    else if (h.active) t = 'Höchste Qualität wird geladen: ' + (h.text || `${mb(h.got)} von ${mb(h.total)} MB`);
+    else if (h.got > 0) t = `Höchste Qualität: ${mb(h.got)} von ${mb(h.total)} MB geladen – geht an dieser Stelle weiter.`;
+    else t = `Höchste Qualität: noch nicht geladen (ca. ${mb(h.total)} MB).`;
+    if (h.waitWifi && !h.done && !h.active) t += ' Startet automatisch im WLAN.';
+    if (h.error && !h.active && !h.done) t += ' Letzter Versuch: ' + h.error + '.';
+    el.hqInfo.textContent = t;
+    el.hqBarWrap.hidden = h.done || !(h.active || h.got > 0);
+    el.hqBar.style.width = (h.total ? Math.min(100, (100 * h.got) / h.total) : 0) + '%';
+    el.hqLoad.hidden = h.done || h.active || state.quality !== 'high';
+    el.hqLoad.textContent = h.got > 0 ? 'Download fortsetzen' : 'Jetzt laden';
+  }
+  async function updateStorageInfo() {
+    if (!navigator.storage || !navigator.storage.estimate) return;
+    try {
+      const e = await navigator.storage.estimate();
+      const p = navigator.storage.persisted ? await navigator.storage.persisted() : false;
+      el.storageInfo.textContent = `App-Speicher: ${mb(e.usage)} MB belegt · ` + (p
+        ? 'dauerhaft gesichert'
+        : 'nicht dauerhaft gesichert – Android darf ihn bei Speichermangel leeren. Abhilfe: App über das Chrome-Menü installieren.');
+    } catch (e) { /* egal */ }
+  }
+  async function startHQ(confirmed) {
+    const h = state.hq;
+    if (h.done || h.active) return;
+    if (!confirmed && isCellular()) { askData(); return; }
+    if (navigator.storage && navigator.storage.estimate) {
+      try {
+        const e = await navigator.storage.estimate();
+        const need = (h.total || 208e6) - (h.got || 0) + 30e6;
+        if (e.quota && e.quota - (e.usage || 0) < need) {
+          h.error = `zu wenig freier Speicher (benötigt ${mb(need)} MB, frei ${mb(e.quota - (e.usage || 0))} MB)`;
+          renderHQ();
+          addMsg('ai', 'Für höchste Qualität ist auf dem Handy nicht genug Speicher frei. Bitte etwas Platz schaffen – bis dahin wird mit Standard gearbeitet.', true);
+          return;
+        }
+      } catch (e) { /* egal */ }
+    }
+    if (navigator.storage && navigator.storage.persist) { try { await navigator.storage.persist(); } catch (e) { /* egal */ } }
+    Object.assign(h, { active: true, error: null, waitWifi: false });
+    renderHQ();
+    call('download', { model: 'lama' }).catch(() => {});
+  }
+  function askData() {
+    const h = state.hq;
+    el.dataText.textContent = `Das Modell für höchste Qualität ist ca. ${mb(h.total)} MB groß${h.got ? `, ${mb(h.got)} MB davon sind schon geladen` : ''}. Du bist gerade im Mobilfunknetz.`;
+    if (!el.dataDlg.open) el.dataDlg.showModal();
+  }
+  function onDownload(m) {
+    const h = state.hq;
+    h.got = m.got; h.total = m.total || h.total; h.text = m.text || '';
+    if (m.done) {
+      h.done = true; h.active = false;
+      addMsg('ai', 'Höchste Qualität ist jetzt dauerhaft auf dem Gerät gespeichert und wird nicht erneut geladen.');
+      updateStorageInfo();
+    } else if (m.error) {
+      h.active = false;
+      h.error = m.cancelled ? null : m.error;
+      if (!m.cancelled) addMsg('ai', `Download unterbrochen bei ${mb(m.got)} von ${mb(m.total)} MB. Die geladenen Teile bleiben gespeichert – beim nächsten Versuch geht es dort weiter.`, true);
+    } else h.active = true;
+    renderHQ();
+  }
+  function noteFallback() {
+    if (state.fbNoted) return;
+    state.fbNoted = true;
+    const h = state.hq;
+    if (!h.active && !h.waitWifi && !isCellular()) startHQ(true);
+    addMsg('ai', h.active || !isCellular()
+      ? 'Höchste Qualität wird noch geladen – bis dahin wird mit Standard bearbeitet.'
+      : 'Höchste Qualität ist noch nicht vollständig geladen – diesmal mit Standard bearbeitet. Unter „Mehr“ kannst du den Download starten.');
+  }
+  el.dataNow.addEventListener('click', () => { el.dataDlg.close(); startHQ(true); });
+  el.dataWifi.addEventListener('click', () => {
+    el.dataDlg.close();
+    state.hq.waitWifi = true; renderHQ();
+    addMsg('ai', 'Alles klar – der Download startet automatisch, sobald du im WLAN bist. Bis dahin wird mit Standard gearbeitet.');
+  });
+  el.hqLoad.addEventListener('click', () => startHQ(false));
+  if (navigator.connection && navigator.connection.addEventListener) {
+    navigator.connection.addEventListener('change', () => {
+      const h = state.hq;
+      if (state.quality === 'high' && !h.done && !h.active && !isCellular() && (h.waitWifi || h.got > 0)) startHQ(true);
+    });
+  }
+
   function askQuality() {
     return new Promise((resolve) => {
       const done = (q) => {
         el.qualityDlg.close();
         state.quality = q; store.set('bt-quality', q); updateQualityLabel();
+        if (q === 'high') startHQ(false);
         resolve(q);
       };
       el.qStd.onclick = () => done('standard');
@@ -239,6 +345,7 @@
   }
 
   async function improve() {
+    let usedHigh = false;
     if (!state.loaded) return;
     if (!state.text || BT.maskArea(state.text.mask) === 0) {
       const r = await applyAction({ type: 'auto' });
@@ -256,8 +363,9 @@
         [base.data.buffer, cur.data.buffer, mask.buffer]);
       applyResult(m);
       state.text = { base: t.base, mask: new Uint8Array(m.mask.buffer), detect: t.detect };
+      usedHigh = quality() === 'high' && !m.fellBack;
     });
-    if (ok) addMsg('ai', (quality() === 'high' ? 'Mit höchster Qualität neu bearbeitet' : 'Neu bearbeitet, mit gründlicherer Suche und etwas größerem Bereich') + '.');
+    if (ok) addMsg('ai', (usedHigh ? 'Mit höchster Qualität neu bearbeitet' : 'Neu bearbeitet, mit gründlicherer Suche und etwas größerem Bereich') + '.');
   }
 
   // Filter auf das Ergebnis anwenden (und auf die Basis für spätere Verbesserungen)
@@ -502,7 +610,7 @@
     if (tool === 'text') { exitModes(); await removeText(false); return; }
     if (tool === 'hue') { if (state.mode === 'pick') exitModes(); else enterPick('remove'); return; }
     if (tool === 'object') { enterBrush('object'); return; }
-    if (tool === 'more') { el.moreDlg.showModal(); return; }
+    if (tool === 'more') { el.moreDlg.showModal(); refreshHQ(); updateStorageInfo(); return; }
     exitModes();
     const a = CHIP_ACTIONS[tool];
     if (a && await applyAction(a)) addMsg('ai', BT.describeAction(a).replace(/^./, (c) => c.toUpperCase()) + '.');
@@ -526,6 +634,9 @@
     if (k === 'quality') {
       state.quality = state.quality === 'high' ? 'standard' : 'high';
       store.set('bt-quality', state.quality); updateQualityLabel();
+      if (state.quality === 'high') startHQ(false);
+      else { state.hq.waitWifi = false; if (state.hq.active) call('cancelDownload', { model: 'lama' }).catch(() => {}); }
+      renderHQ();
       return;
     }
     el.moreDlg.close();
@@ -584,4 +695,9 @@
   disableUI(false);
   defaultHint();
   checkShared();
+  // angefangenen Download im WLAN automatisch fortsetzen
+  refreshHQ().then(() => {
+    const h = state.hq;
+    if (state.quality === 'high' && !h.done && !h.active && h.got > 0 && !isCellular()) startHQ(true);
+  });
 })();

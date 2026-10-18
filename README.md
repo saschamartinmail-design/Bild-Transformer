@@ -43,7 +43,9 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 | `ort/` | onnxruntime-web 1.30.0 (Rechen-Engine) |
 | `models/` | Texterkennungsmodell (PP-OCRv4 det) |
 
-Die Rekonstruktionsmodelle werden beim ersten Gebrauch von Hugging Face geladen (Ersatz: jsDelivr/unpkg) und danach im Browser gespeichert.
+Die Rekonstruktionsmodelle werden beim ersten Gebrauch von Hugging Face geladen (Ersatz: jsDelivr/unpkg) und dauerhaft im Browser gespeichert – in Teilen zu 4 MB, jeder Teil sofort. Bricht die Verbindung ab, wird an der Abbruchstelle fortgesetzt (automatisch bis zu 6 Versuche, danach beim nächsten Start); bereits geladene Daten werden nie erneut übertragen.
+
+Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wird mit Standard gearbeitet. Im Mobilfunknetz fragt die App vorher und kann den Download auf WLAN verschieben. Unter „Mehr“ steht, wie viel geladen ist und ob der App-Speicher dauerhaft gesichert ist. Ist er das nicht, darf Android ihn bei Speichermangel leeren – dann die App über das Chrome-Menü installieren.
 
 ## Grenzen
 

@@ -133,6 +133,9 @@
   .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
   .grid .btn { flex: none; }
   .small { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  .hq { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+  .hq .small { margin: 0; }
+  .hq .bar { width: 100%; max-width: none; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -249,7 +252,13 @@
     <button class="btn" type="button" data-more="reset">Zurück zum Original</button>
     <button class="btn" type="button" data-more="quality" id="qualityToggle">Qualität: Standard</button>
   </div>
+  <div class="hq" id="hqBox">
+    <p class="small" id="hqInfo">Höchste Qualität: wird geprüft …</p>
+    <div class="bar" id="hqBarWrap" hidden><i id="hqBar"></i></div>
+    <button class="btn" type="button" id="hqLoad" hidden>Jetzt laden</button>
+  </div>
   <button class="btn" type="button" id="moreClose" style="width:100%">Schließen</button>
+  <p class="small" id="storageInfo"></p>
   <p class="small" id="engineInfo"></p>
 </dialog>
 
@@ -262,9 +271,18 @@
   </div>
 </dialog>
 
+<dialog id="dataDlg">
+  <h2>Über mobile Daten laden?</h2>
+  <p id="dataText">Das Modell für höchste Qualität ist ca. 208 MB groß. Du bist gerade im Mobilfunknetz.</p>
+  <div class="row">
+    <button class="btn" type="button" id="dataWifi">Im WLAN laden</button>
+    <button class="btn primary" type="button" id="dataNow">Jetzt laden</button>
+  </div>
+</dialog>
+
 <dialog id="qualityDlg">
   <h2>Höchste Qualität nutzen?</h2>
-  <p>Dafür wird einmalig ein größeres KI-Modell geladen (ca. 208 MB, am besten im WLAN). Die Rekonstruktion wird deutlich besser, dauert auf dem Handy aber spürbar länger. Du kannst das später unter „Mehr“ wieder umstellen.</p>
+  <p>Dafür wird einmalig ein größeres KI-Modell geladen (ca. 208 MB) und dauerhaft auf dem Gerät gespeichert. Der Download läuft im Hintergrund und setzt nach Unterbrechungen an der Abbruchstelle fort – bis er fertig ist, wird mit Standard gearbeitet. Die Rekonstruktion wird deutlich besser, dauert auf dem Handy aber spürbar länger.</p>
   <div class="row">
     <button class="btn" type="button" value="standard" id="qStd">Standard</button>
     <button class="btn primary" type="button" value="high" id="qHigh">Höchste Qualität</button>

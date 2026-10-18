@@ -39,55 +39,169 @@ let currentJob = 0;
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const status = (text, frac) => post({ type: 'progress', job: currentJob, text, frac: frac == null ? null : frac });
 
-async function cachedModel(key) {
-  const cache = await caches.open(MODEL_CACHE);
-  for (const url of MODELS[key].urls) {
-    const hit = await cache.match(url);
-    if (hit) return new Uint8Array(await hit.arrayBuffer());
+/* Modell-Speicher
+   Große Modelle werden in Teilen zu 4 MB geladen und jeder fertige Teil sofort gespeichert.
+   Bricht die Verbindung ab, geht es beim nächsten Versuch an der Abbruchstelle weiter
+   (HTTP-Range) – bereits geladene Teile werden nie ein zweites Mal übertragen. */
+const PART = 4 * 1024 * 1024;
+const downloads = {};          // key -> { promise, ctrl }
+// Eigene Schlüssel per Query-Parameter (der Cache-Speicher ignoriert #-Anhänge beim Vergleichen)
+const metaKey = (url) => url + '?bt=meta';
+const partKey = (url, i) => url + '?bt=part-' + i;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function readMeta(cache, url) {
+  const r = await cache.match(metaKey(url));
+  if (!r) return null;
+  try { return await r.json(); } catch (e) { return null; }
+}
+const writeMeta = (cache, url, meta) => cache.put(metaKey(url), new Response(JSON.stringify(meta), { headers: { 'content-type': 'application/json' } }));
+
+async function clearParts(cache, url) {
+  for (const req of await cache.keys()) {
+    if (req.url.startsWith(url + '?bt=')) await cache.delete(req);
   }
-  return null;
 }
 
-async function fetchModel(key) {
-  const m = MODELS[key];
-  const hit = await cachedModel(key);
-  if (hit) return hit;
-  let lastErr = null;
-  for (const url of m.urls) {
-    try {
-      const res = await fetch(url, { mode: 'cors' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const total = Number(res.headers.get('content-length')) || m.mb * 1e6;
-      const reader = res.body.getReader();
-      const chunks = [];
-      let got = 0, last = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value); got += value.length;
-        const now = Date.now();
-        if (now - last > 250) {
-          last = now;
-          status(`Einmaliger Download: ${m.name} (${Math.round(got / 1e6)} von ${Math.round(total / 1e6)} MB)`, Math.min(1, got / total));
-        }
-      }
-      if (got < 1e6) throw new Error('unvollständige Datei');
-      const buf = new Uint8Array(got);
-      let o = 0;
-      for (const c of chunks) { buf.set(c, o); o += c.length; }
-      const cache = await caches.open(MODEL_CACHE);
-      await cache.put(url, new Response(buf, { headers: { 'content-type': 'application/octet-stream' } }));
-      return buf;
-    } catch (e) {
-      lastErr = e;
+// Stand eines Modells: fertig gespeichert, teilweise geladen oder gar nicht
+async function modelState(key) {
+  const cache = await caches.open(MODEL_CACHE);
+  let best = { done: false, got: 0, total: MODELS[key].mb * 1e6 };
+  for (const url of MODELS[key].urls) {
+    if (await cache.match(url)) return { done: true, got: best.total, total: best.total, url };
+    const meta = await readMeta(cache, url);
+    if (meta) {
+      const got = meta.bytes || 0;
+      if (meta.done) return { done: true, got, total: meta.total || got, url, parts: true };
+      if (got > best.got) best = { done: false, got, total: meta.total || best.total, url };
     }
   }
-  throw new Error(`${m.name} konnte nicht geladen werden (${lastErr ? lastErr.message : 'unbekannt'}). Beim ersten Start ist eine Internetverbindung nötig.`);
+  return best;
+}
+
+async function loadCached(key) {
+  const st = await modelState(key);
+  if (!st.done) return null;
+  const cache = await caches.open(MODEL_CACHE);
+  if (!st.parts) return new Uint8Array(await (await cache.match(st.url)).arrayBuffer());
+  const meta = await readMeta(cache, st.url);
+  const buf = new Uint8Array(meta.bytes);
+  let o = 0;
+  for (let i = 0; i < meta.parts; i++) {
+    const r = await cache.match(partKey(st.url, i));
+    if (!r) { await clearParts(cache, st.url); return null; }   // beschädigt -> neu laden
+    const b = new Uint8Array(await r.arrayBuffer());
+    buf.set(b, o); o += b.length;
+  }
+  if (o !== meta.bytes) { await clearParts(cache, st.url); return null; }
+  return buf;
+}
+
+// Lädt eine URL fortsetzbar in Teilen. onProgress(got, total)
+async function downloadResumable(url, onProgress, signal) {
+  const cache = await caches.open(MODEL_CACHE);
+  let meta = (await readMeta(cache, url)) || { total: 0, parts: 0, bytes: 0, done: false };
+  if (meta.done) return;
+  let fails = 0;
+  for (;;) {
+    const start = meta.bytes;
+    let progressed = false;
+    try {
+      const res = await fetch(url, { mode: 'cors', signal, headers: start ? { Range: `bytes=${start}-` } : {} });
+      if (start && res.status === 200) {                // Server ignoriert die Fortsetzung -> sauber neu beginnen
+        try { res.body.cancel(); } catch (e) { /* egal */ }
+        await clearParts(cache, url);
+        meta = { total: 0, parts: 0, bytes: 0, done: false };
+        if (++fails > 2) throw new Error('Server unterstützt kein Fortsetzen');
+        continue;
+      }
+      if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status);
+      const len = Number(res.headers.get('content-length')) || 0;
+      if (!meta.total && len) meta.total = start + len;
+      const reader = res.body.getReader();
+      let cur = new Uint8Array(PART), fill = 0, last = 0;
+      const flush = async (final) => {
+        if (!fill && !final) return;
+        if (fill) {
+          await cache.put(partKey(url, meta.parts), new Response(cur.slice(0, fill), { headers: { 'content-type': 'application/octet-stream' } }));
+          meta.parts++; meta.bytes += fill; fill = 0;
+        }
+        if (final) meta.done = true;
+        await writeMeta(cache, url, meta);
+      };
+      for (;;) {
+        let chunk;
+        try { chunk = await reader.read(); } catch (err) {
+          // Verbindung weg: bis hierhin empfangene Daten trotzdem sichern -> kein Byte doppelt laden
+          if (fill) { await flush(false); progressed = true; }
+          throw err;
+        }
+        const { done, value } = chunk;
+        if (done) break;
+        let off = 0;
+        while (off < value.length) {
+          const n = Math.min(PART - fill, value.length - off);
+          cur.set(value.subarray(off, off + n), fill);
+          fill += n; off += n;
+          if (fill === PART) { await flush(false); progressed = true; }
+        }
+        const now = Date.now();
+        if (now - last > 300) { last = now; onProgress(meta.bytes + fill, meta.total); }
+      }
+      if (meta.total && meta.bytes + fill !== meta.total) {
+        await flush(false);
+        throw new Error('Verbindung abgebrochen');
+      }
+      await flush(true);
+      onProgress(meta.bytes, meta.total || meta.bytes);
+      return;
+    } catch (e) {
+      if (signal && signal.aborted) throw new Error('abgebrochen');
+      if (e && e.name === 'QuotaExceededError') throw new Error('zu wenig freier Speicher auf dem Gerät');
+      if (progressed) fails = 0;
+      if (++fails > 6) throw e;                           // Teile bleiben gespeichert -> später weiter
+      onProgress(meta.bytes, meta.total, true);
+      await sleep(Math.min(30000, 2000 * 2 ** (fails - 1)));
+    }
+  }
+}
+
+// Modell sicherstellen (einmaliger, fortsetzbarer Download)
+async function ensureModel(key, report) {
+  if (downloads[key]) return downloads[key].promise;
+  const m = MODELS[key];
+  const ctrl = new AbortController();
+  const promise = (async () => {
+    let lastErr = null;
+    const st = await modelState(key);
+    if (st.done) return;
+    const order = st.url ? [st.url, ...m.urls.filter((u) => u !== st.url)] : m.urls;   // angefangenen Download zuerst fortsetzen
+    for (const url of order) {
+      try {
+        await downloadResumable(url, (got, total, retry) => report(got, total || m.mb * 1e6, retry), ctrl.signal);
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (ctrl.signal.aborted) throw e;
+      }
+    }
+    throw new Error(`${m.name} konnte nicht vollständig geladen werden (${lastErr ? lastErr.message : 'unbekannt'}). Bereits geladene Teile bleiben gespeichert, beim nächsten Versuch geht es dort weiter.`);
+  })();
+  downloads[key] = { promise, ctrl };
+  try { await promise; } finally { delete downloads[key]; }
 }
 
 async function getSession(key) {
   if (!sessions[key]) {
-    const buf = await fetchModel(key);
+    let buf = await loadCached(key);
+    if (!buf) {
+      const m = MODELS[key];
+      await ensureModel(key, (got, total, retry) => status(retry
+        ? `Verbindung unterbrochen – ${m.name} wird gleich fortgesetzt (${Math.round(got / 1e6)} von ${Math.round(total / 1e6)} MB)`
+        : `Einmaliger Download: ${m.name} (${Math.round(got / 1e6)} von ${Math.round(total / 1e6)} MB)`, Math.min(1, got / total)));
+      buf = await loadCached(key);
+      if (!buf) throw new Error(`${MODELS[key].name} konnte nicht gelesen werden.`);
+    }
     status(`${MODELS[key].name} wird vorbereitet …`, null);
     sessions[key] = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
   }
@@ -126,9 +240,18 @@ function modelRunner(key, sess) {
   };
 }
 
+let lamaBroken = false;
 async function inpaint(img, mask, quality, opt) {
-  const key = quality === 'high' ? 'lama' : 'migan';
-  const sess = await getSession(key);
+  let key = quality === 'high' && !lamaBroken ? 'lama' : 'migan';
+  let sess;
+  if (key === 'lama') {
+    try { sess = await getSession('lama'); } catch (e) {
+      lamaBroken = true;                                   // z. B. zu wenig Arbeitsspeicher -> Standard
+      post({ type: 'notice', text: 'Höchste Qualität ließ sich auf diesem Gerät nicht starten – es wird Standard verwendet.' });
+      key = 'migan';
+    }
+  }
+  if (!sess) sess = await getSession(key);
   const o = Object.assign({ win: key === 'lama' ? 768 : 1024 }, opt || {});
   o.onProgress = (i, n) => status(n > 1 ? `Bild wird rekonstruiert (${i} von ${n})` : 'Bild wird rekonstruiert …', n > 1 ? i / n : null);
   status('Bild wird rekonstruiert …', null);
@@ -173,8 +296,21 @@ const handlers = {
     for (const k of m.models || ['det', 'migan']) await getSession(k);
     return [null, {}];
   },
-  async hasModel(m) {
-    return [null, { cached: !!(await cachedModel(m.model)) }];
+  async modelStatus(m) {
+    const st = await modelState(m.model);
+    return [null, { done: st.done, got: st.got, total: st.total, active: !!downloads[m.model] }];
+  },
+  // Hintergrund-Download (läuft parallel zu Bearbeitungen weiter)
+  async download(m) {
+    const key = m.model, mb = (v) => Math.round(v / 1e6);
+    ensureModel(key, (got, total, retry) => post({ type: 'dl', model: key, got, total, retry: !!retry, text: (retry ? 'Unterbrochen, wird fortgesetzt … ' : '') + `${mb(got)} von ${mb(total)} MB` }))
+      .then(async () => { const st = await modelState(key); post({ type: 'dl', model: key, done: true, got: st.got, total: st.total }); })
+      .catch(async (e) => { const st = await modelState(key); post({ type: 'dl', model: key, error: e.message, got: st.got, total: st.total, cancelled: e.message === 'abgebrochen' }); });
+    return [null, {}];
+  },
+  async cancelDownload(m) {
+    if (downloads[m.model]) downloads[m.model].ctrl.abort();
+    return [null, {}];
   },
   async removeText(m) {
     const img = toImg(m.image);
@@ -221,11 +357,14 @@ const handlers = {
 
 self.onmessage = async (e) => {
   const m = e.data;
-  currentJob = m.id;
+  if (!['modelStatus', 'download', 'cancelDownload'].includes(m.cmd)) currentJob = m.id;
   try {
     const h = handlers[m.cmd];
     if (!h) throw new Error('Unbekannter Auftrag: ' + m.cmd);
+    let fellBack = false;
+    if (m.quality === 'high' && !sessions.lama && !(await modelState('lama')).done) { m.quality = 'standard'; fellBack = true; }
     const [img, extra] = await h(m);
+    if (fellBack) extra.fellBack = true;
     reply(m.id, img, extra);
   } catch (err) {
     post({ type: 'error', id: m.id, message: (err && err.message) || String(err) });
