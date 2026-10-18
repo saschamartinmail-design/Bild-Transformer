@@ -23,7 +23,7 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 |---|---|
 | Schrift | automatische Erkennung (auch schräg), zusätzliche Suche nach blasser Schrift, Rekonstruktion in voller Auflösung, „Verbessern“ für einen zweiten Durchgang, „Nachmalen“ für übersehene Stellen |
 | Transparente Schrift | Farbe und Deckkraft werden geschätzt und die Schrift herausgerechnet – das Foto darunter bleibt erhalten statt neu erfunden zu werden (bis ca. 65 % Deckkraft; stärker deckende Schrift wird rekonstruiert) |
-| Objekte | „Objekt weg“: übermalen und entfernen lassen |
+| Objekte | „Objekt weg“: Objekt übermalen oder einkreisen – die markierte Fläche (auch das Innere eines Kreises) wird mit passendem Hintergrund aufgefüllt; danach zeigt der Regler das ganze Ergebnis |
 | Korrektur | Auto, Heller/Dunkler, Kontrast, Wärmer/Kälter, Schärfer/Weicher, Kräftiger/Blasser |
 | Stil | Retro (Sepia, Körnung, Vignette), Schwarzweiß, kontrastreiches Schwarzweiß |
 | Farbe | Farbton antippen und entfernen, „Nur eine Farbe behalten“, Farbstich entfernen (per Kommando) |

@@ -340,7 +340,9 @@ const handlers = {
   },
   async inpaintMask(m) {
     const img = toImg(m.image);
-    const mask = new Uint8Array(m.mask.buffer);
+    let mask = new Uint8Array(m.mask.buffer);
+    // Pinselstriche: eingekreiste Flächen mitfüllen, schmalen Rand ergänzen
+    if (m.brush) { status('Markierung wird vorbereitet …', null); mask = BT.prepareBrushMask(mask, img.width, img.height); }
     if (m.smart) {
       const sm = await smartRemove(img, mask, m.quality);
       const fin = await cleanupPass(sm.image, sm.mask, m.quality);

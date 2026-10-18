@@ -479,7 +479,7 @@
     el.cvMask.hidden = false;
     el.cvOrig.hidden = true; el.divider.hidden = true; el.tagL.hidden = true; el.tagR.hidden = true;
     el.actions.hidden = true; el.tools.hidden = true; el.brushBar.hidden = false;
-    setHint(kind === 'retouch' ? 'Male über Reste, die noch verschwinden sollen. Rot = wird neu aufgefüllt.' : 'Male über das Objekt, das verschwinden soll.');
+    setHint(kind === 'retouch' ? 'Male über Reste, die noch verschwinden sollen. Rot = wird neu aufgefüllt.' : 'Male über das Objekt oder kreise es ein – die markierte Fläche wird mit Hintergrund aufgefüllt.');
   }
   function exitModes() {
     state.mode = 'compare'; state.brushKind = null;
@@ -509,9 +509,10 @@
   }
   async function applyBrush() {
     const md = ctxM.getImageData(0, 0, state.w, state.h).data;
-    const mask = new Uint8Array(state.w * state.h);
-    for (let i = 0; i < mask.length; i++) mask[i] = md[i * 4 + 3] > 0 ? 1 : 0;
-    if (BT.maskArea(mask) === 0) { exitModes(); return; }
+    const raw = new Uint8Array(state.w * state.h);
+    for (let i = 0; i < raw.length; i++) raw[i] = md[i * 4 + 3] > 0 ? 1 : 0;
+    if (BT.maskArea(raw) === 0) { exitModes(); return; }
+    const mask = raw;   // wird im Hintergrund aufbereitet (eingekreiste Flächen füllen, Rand ergänzen)
     const kind = state.brushKind;
     const t = state.text;
     exitModes();
@@ -521,18 +522,22 @@
       if (retouch) {
         const base = copyImageData(t.base);
         const union = BT.maskUnion(t.mask, mask);
-        const m = await call('inpaintMask', { image: pack(base), mask: { buffer: union.buffer }, quality: quality(), smart: t.detect }, [base.data.buffer, union.buffer]);
+        const m = await call('inpaintMask', { image: pack(base), mask: { buffer: union.buffer }, quality: quality(), smart: t.detect, brush: true }, [base.data.buffer, union.buffer]);
         applyResult(m);
         state.text = { base: t.base, mask: new Uint8Array(m.mask.buffer), detect: t.detect };
       } else {
         const cur = getCur();
         const base = copyImageData(cur);
-        const m = await call('inpaintMask', { image: pack(cur), mask: { buffer: mask.buffer }, quality: quality() }, [cur.data.buffer, mask.buffer]);
+        const m = await call('inpaintMask', { image: pack(cur), mask: { buffer: mask.buffer }, quality: quality(), brush: true }, [cur.data.buffer, mask.buffer]);
         applyResult(m);
         state.text = { base, mask: new Uint8Array(m.mask.buffer), detect: false };
       }
     });
-    if (ok) addMsg('ai', retouch ? 'Markierte Stellen neu aufgefüllt.' : 'Objekt entfernt.');
+    if (ok) {
+      // Ganzes Ergebnis zeigen – sonst verdeckt die „Original“-Hälfte die Änderung, wenn sie links liegt
+      setPos(0);
+      addMsg('ai', (retouch ? 'Markierte Stellen neu aufgefüllt.' : 'Objekt entfernt.') + ' Zum Vergleichen den Regler von links ins Bild ziehen.');
+    }
   }
 
   // ------------------------------------------------------------ Speichern

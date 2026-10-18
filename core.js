@@ -109,6 +109,37 @@
     return out;
   };
 
+  /* Pinselmaske für „Objekt weg“ / „Nachmalen“ aufbereiten:
+     1. Eingekreiste Flächen werden mitgefüllt – wer einen Kreis um ein Objekt malt, meint den Inhalt,
+        nicht nur die Linie. Kleine Lücken im Kreis (bis ca. 3 % der Bildkante) werden dabei geschlossen.
+     2. Ein schmaler Rand kommt dazu, damit Kanten, Schatten und Kantenglättung des Objekts mit verschwinden. */
+  BT.prepareBrushMask = function (mask, w, h) {
+    const n = w * h, side = Math.max(w, h), gap = Math.max(4, Math.round(0.015 * side));
+    const closed = BT.dilate(mask, w, h, gap);
+    // Alles, was vom Bildrand aus erreichbar ist, ohne die (geschlossene) Linie zu kreuzen, ist „außen“
+    const outside = new Uint8Array(n), stack = new Int32Array(n);
+    let sp = 0;
+    const push = (i) => { if (!closed[i] && !outside[i]) { outside[i] = 1; stack[sp++] = i; } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (sp) {
+      const j = stack[--sp], x = j % w;
+      if (x > 0) push(j - 1);
+      if (x < w - 1) push(j + 1);
+      if (j >= w) push(j - w);
+      if (j < n - w) push(j + w);
+    }
+    const out = BT.dilate(mask, w, h, Math.max(2, Math.round(0.004 * side)));
+    const holes = new Uint8Array(n);
+    let any = false;
+    for (let i = 0; i < n; i++) if (!closed[i] && !outside[i]) { holes[i] = 1; any = true; }
+    if (!any) return out;
+    // Die Innenfläche ist durch das Schließen um „gap“ geschrumpft – wieder bis an die Linie ausdehnen
+    const inner = BT.dilate(holes, w, h, gap + 1);
+    for (let i = 0; i < n; i++) if (inner[i]) out[i] = 1;
+    return out;
+  };
+
   // Zusammenhängende Bereiche einer Maske nummerieren (4er-Nachbarschaft) -> {labels, count}
   BT.labelComponents = function (mask, w, h) {
     const labels = new Int32Array(w * h), stack = new Int32Array(w * h);
