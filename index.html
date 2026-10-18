@@ -133,6 +133,7 @@
   .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
   .grid .btn { flex: none; }
   .small { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  #notifyInfo { margin: -4px 0 12px; }
   .hq { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
   .hq .small { margin: 0; }
   .hq .bar { width: 100%; max-width: none; }
@@ -251,7 +252,9 @@
     <button class="btn" type="button" data-more="colorPop">Nur eine Farbe behalten</button>
     <button class="btn" type="button" data-more="reset">Zurück zum Original</button>
     <button class="btn" type="button" data-more="quality" id="qualityToggle">Qualität: Standard</button>
+    <button class="btn" type="button" data-more="notify" id="notifyToggle">Hinweis, wenn fertig: Aus</button>
   </div>
+  <p class="small" id="notifyInfo" hidden></p>
   <div class="hq" id="hqBox">
     <p class="small" id="hqInfo">Höchste Qualität: wird geprüft …</p>
     <div class="bar" id="hqBarWrap" hidden><i id="hqBar"></i></div>
@@ -268,6 +271,15 @@
   <div class="row">
     <button class="btn" type="button" id="resetNo">Abbrechen</button>
     <button class="btn primary" type="button" id="resetYes">Schließen</button>
+  </div>
+</dialog>
+
+<dialog id="resumeDlg">
+  <h2>Bearbeitung fortsetzen?</h2>
+  <p id="resumeText">Die letzte Bearbeitung wurde nicht fertig.</p>
+  <div class="row">
+    <button class="btn" type="button" id="resumeNo">Verwerfen</button>
+    <button class="btn primary" type="button" id="resumeYes">Fortsetzen</button>
   </div>
 </dialog>
 

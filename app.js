@@ -19,6 +19,8 @@
     qualityDlg: $('qualityDlg'), qStd: $('qStd'), qHigh: $('qHigh'),
     hqInfo: $('hqInfo'), hqBar: $('hqBar'), hqBarWrap: $('hqBarWrap'), hqLoad: $('hqLoad'), storageInfo: $('storageInfo'),
     dataDlg: $('dataDlg'), dataText: $('dataText'), dataWifi: $('dataWifi'), dataNow: $('dataNow'),
+    resumeDlg: $('resumeDlg'), resumeText: $('resumeText'), resumeYes: $('resumeYes'), resumeNo: $('resumeNo'),
+    notifyToggle: $('notifyToggle'), notifyInfo: $('notifyInfo'),
   };
   const ctxO = el.cvOrig.getContext('2d', { willReadFrequently: true });
   const ctxR = el.cvResult.getContext('2d', { willReadFrequently: true });
@@ -35,7 +37,7 @@
     mode: 'compare', brushKind: null, pickMode: 'remove',
     quality: store.get('bt-quality'),
     hq: { done: false, got: 0, total: 208e6, active: false, error: null, waitWifi: false, text: '' },
-    fbNoted: false,
+    fbNoted: false, leftDuringRun: false,
   };
 
   // ------------------------------------------------------------ Worker
@@ -69,7 +71,7 @@
     const id = ++jobId;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      worker.postMessage(Object.assign({ id, cmd }, payload), transfer || []);
+      worker.postMessage(Object.assign({ id, cmd, resume: resume.active }, payload), transfer || []);
     });
   }
 
@@ -132,27 +134,120 @@
     },
   };
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state.busy) screenLock.on();
+    if (document.visibilityState === 'hidden') { if (state.busy) state.leftDuringRun = true; return; }
+    if (state.busy) screenLock.on();
+    notify.clear();
+    if (state.leftDuringRun && notify.supported && !notify.on() && Notification.permission !== 'denied' && !store.get('bt-notify-tip')) {
+      store.set('bt-notify-tip', '1');
+      addMsg('ai', 'Tipp: Unter „Mehr“ → „Hinweis, wenn fertig“ meldet sich die App, sobald ein Bild fertig ist. So musst du nicht nachsehen.');
+    }
   });
+
+  // ------------------------------------------------------------ Fortsetzen nach Abbruch
+  /* Vor jeder Rekonstruktion wird der Auftrag auf dem Gerät gesichert (Foto, Markierung, Art),
+     der Rechenkern speichert jedes fertige Bildteil. Beendet Android die App im Hintergrund,
+     bleibt beides erhalten; beim nächsten Öffnen geht es dort weiter. Ist der Auftrag fertig
+     (oder mit Fehler beendet), wird alles gelöscht. */
+  const plain = (d) => ({ data: d.data, width: d.width, height: d.height });
+  const resume = {
+    active: false, resuming: false,
+    // muss abgewartet werden, BEVOR die Bilddaten an den Rechenkern übergeben werden
+    async begin(kind, cur, extra) {
+      this.active = true;
+      if (this.resuming) return;              // Auftrag liegt bereits gesichert vor
+      const db = await BT.resumeDb();
+      if (!db) return;
+      try {
+        const t = state.text;
+        const rec = Object.assign({
+          v: 1, at: Date.now(), kind, name: state.name, type: state.type, w: state.w, h: state.h,
+          original: plain(ctxO.getImageData(0, 0, state.w, state.h)), current: plain(cur),
+          text: t ? { base: plain(t.base), mask: t.mask, detect: t.detect } : null,
+        }, extra || {});
+        // put() kopiert sofort; das Schreiben läuft parallel zur Berechnung
+        BT.idbTx(db, ['job', 'calls'], 'readwrite', (st) => { st.calls.clear(); st.job.put(rec, 'cur'); })
+          .catch(() => { /* z. B. Speicher voll: dann eben ohne Fortsetzen */ });
+      } catch (e) { /* ohne Fortsetzen weiter */ }
+    },
+    async end() {
+      if (!this.active) return;
+      this.active = false;
+      const db = await BT.resumeDb();
+      if (db) BT.idbTx(db, ['job', 'calls'], 'readwrite', (st) => { st.job.clear(); st.calls.clear(); }).catch(() => {});
+    },
+    async load() {
+      const db = await BT.resumeDb();
+      if (!db) return null;
+      try { return await BT.idbTx(db, 'job', 'readonly', (st) => st.job.get('cur')); } catch (e) { return null; }
+    },
+    discard() { this.active = true; return this.end(); },
+  };
+
+  // ------------------------------------------------------------ Hinweis „Fertig“
+  const notify = {
+    supported: 'Notification' in window && 'serviceWorker' in navigator,
+    on() { return this.supported && store.get('bt-notify') === 'on' && Notification.permission === 'granted'; },
+    async show(ok) {
+      if (document.visibilityState !== 'hidden' || !this.on()) return;
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) await reg.showNotification('Bildtransformer', {
+          body: ok ? 'Dein Bild ist fertig.' : 'Die Bearbeitung hat nicht geklappt. Tippe hier für Details.',
+          tag: 'bt-done', renotify: true, icon: 'icons/icon-192.png',
+        });
+      } catch (e) { /* egal */ }
+    },
+    async clear() {
+      if (!this.supported) return;
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) (await reg.getNotifications({ tag: 'bt-done' })).forEach((n) => n.close());
+      } catch (e) { /* egal */ }
+    },
+  };
+  function updateNotifyLabel() {
+    el.notifyToggle.textContent = 'Hinweis, wenn fertig: ' + (notify.on() ? 'An' : 'Aus');
+  }
+  function notifyInfo(text) { el.notifyInfo.textContent = text || ''; el.notifyInfo.hidden = !text; }
+  async function toggleNotify() {
+    notifyInfo('');
+    if (!notify.supported) { notifyInfo('Dieser Browser kann keine Benachrichtigungen anzeigen.'); return; }
+    if (notify.on()) { store.set('bt-notify', 'off'); updateNotifyLabel(); return; }
+    let p = Notification.permission;
+    if (p === 'default') { try { p = await Notification.requestPermission(); } catch (e) { p = Notification.permission; } }
+    if (p === 'granted') {
+      store.set('bt-notify', 'on');
+      notifyInfo('Läuft die App im Hintergrund weiter, meldet sie sich, sobald das Bild fertig ist. Hat Android sie beendet, geht es beim nächsten Öffnen weiter.');
+    } else {
+      notifyInfo('Benachrichtigungen sind für die App blockiert. Freigeben: lange auf das App-Symbol tippen → App-Info → Benachrichtigungen (oder in Chrome unter Website-Einstellungen).');
+    }
+    updateNotifyLabel();
+  }
 
   async function run(label, fn) {
     if (state.busy) return undefined;
     state.busy = true;
+    state.leftDuringRun = document.visibilityState === 'hidden';
     hideSave();
     setBusy(label, null);
     disableUI(true);
     screenLock.on();
+    let ok = false;
     try {
       const r = await fn();
+      ok = true;
       return r === undefined ? true : r;
     } catch (e) {
       addMsg('ai', 'Das hat nicht geklappt: ' + e.message, true);
       return undefined;
     } finally {
+      const long = resume.active;             // nur Rekonstruktionen melden, keine Sekundenfilter
+      resume.end();
       state.busy = false;
       screenLock.off();
       el.busy.hidden = true;
       disableUI(false);
+      if (long) notify.show(ok);
     }
   }
 
@@ -197,7 +292,11 @@
     if (bmp.close) bmp.close();
     ctxR.drawImage(el.cvOrig, 0, 0);
     Object.assign(state, { loaded: true, w, h, name: file.name || 'Foto', type: file.type || 'image/jpeg', history: [], text: null });
-    el.meta.textContent = `${state.name} · ${w} × ${h}${s < 1 ? ' (verkleinert)' : ''}`;
+    showPhoto(s < 1 ? ' (verkleinert)' : '');
+    setHint('Foto geladen – tippe auf „Schrift weg“ oder ein anderes Werkzeug.');
+  }
+  function showPhoto(note) {
+    el.meta.textContent = `${state.name} · ${state.w} × ${state.h}${note || ''}`;
     el.empty.hidden = true;
     el.viewer.hidden = false;
     el.resetBtn.hidden = false;
@@ -205,7 +304,6 @@
     layout();
     setPos(0.5);
     disableUI(false);
-    setHint('Foto geladen – tippe auf „Schrift weg“ oder ein anderes Werkzeug.');
   }
 
   // ------------------------------------------------------------ Reset (leere Fläche)
@@ -238,6 +336,7 @@
       const cur = getCur();
       const base = copyImageData(cur);
       pushHistory();
+      await resume.begin('removeText', cur, { auto: !!auto });
       const m = await call('removeText', { image: pack(cur), quality: quality() }, [cur.data.buffer]);
       if (!m.found) {
         state.history.pop();
@@ -386,6 +485,7 @@
       const base = copyImageData(t.base);
       const mask = new Uint8Array(t.mask);
       pushHistory();
+      await resume.begin('improve', cur);
       const m = await call('improve', { base: pack(base), current: pack(cur), mask: { buffer: mask.buffer }, quality: quality(), detect: t.detect },
         [base.data.buffer, cur.data.buffer, mask.buffer]);
       applyResult(m);
@@ -539,13 +639,16 @@
     const raw = new Uint8Array(state.w * state.h);
     for (let i = 0; i < raw.length; i++) raw[i] = md[i * 4 + 3] > 0 ? 1 : 0;
     if (BT.maskArea(raw) === 0) { exitModes(); return; }
-    const mask = raw;   // wird im Hintergrund aufbereitet (eingekreiste Flächen füllen, Rand ergänzen)
     const kind = state.brushKind;
-    const t = state.text;
     exitModes();
+    await doBrush(kind, raw);   // Maske wird im Hintergrund aufbereitet (eingekreiste Flächen füllen, Rand ergänzen)
+  }
+  async function doBrush(kind, mask) {
+    const t = state.text;
     const retouch = kind === 'retouch' && t && BT.maskArea(t.mask) > 0;
     const ok = await run('Bild wird rekonstruiert …', async () => {
       pushHistory();
+      await resume.begin('brush', getCur(), { brushKind: kind, brushMask: new Uint8Array(mask) });
       if (retouch) {
         const base = copyImageData(t.base);
         const union = BT.maskUnion(t.mask, mask);
@@ -642,7 +745,7 @@
     if (tool === 'text') { exitModes(); await removeText(false); return; }
     if (tool === 'hue') { if (state.mode === 'pick') exitModes(); else enterPick('remove'); return; }
     if (tool === 'object') { enterBrush('object'); return; }
-    if (tool === 'more') { el.moreDlg.showModal(); refreshHQ(); updateStorageInfo(); return; }
+    if (tool === 'more') { notifyInfo(''); updateNotifyLabel(); el.moreDlg.showModal(); refreshHQ(); updateStorageInfo(); return; }
     exitModes();
     const a = CHIP_ACTIONS[tool];
     if (a && await applyAction(a)) addMsg('ai', BT.describeAction(a).replace(/^./, (c) => c.toUpperCase()) + '.');
@@ -663,6 +766,7 @@
     const b = e.target.closest('button[data-more]');
     if (!b) return;
     const k = b.dataset.more;
+    if (k === 'notify') { await toggleNotify(); return; }
     if (k === 'quality') {
       state.quality = state.quality === 'high' ? 'standard' : 'high';
       store.set('bt-quality', state.quality); updateQualityLabel();
@@ -695,7 +799,7 @@
   window.addEventListener('resize', layout);
 
   // Fotos per „Teilen“ aus der Galerie empfangen (Android)
-  async function checkShared() {
+  async function checkShared(discard) {
     if (!new URLSearchParams(location.search).has('shared') || !('caches' in window)) return;
     try {
       const c = await caches.open('bt-share');
@@ -703,6 +807,11 @@
       const res = await c.match(key);
       history.replaceState(null, '', location.pathname);
       if (!res) return;
+      if (discard) {
+        await c.delete(key);
+        addMsg('ai', 'Das geteilte Foto habe ich nicht geöffnet, damit die fortgesetzte Bearbeitung erhalten bleibt. Teile es danach einfach noch einmal.');
+        return;
+      }
       const blob = await res.blob();
       const name = decodeURIComponent(res.headers.get('x-name') || 'geteiltes-bild.jpg');
       await c.delete(key);
@@ -723,10 +832,56 @@
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
+  // Unterbrochene Bearbeitung wiederherstellen und fortsetzen
+  function askResume(rec) {
+    return new Promise((resolve) => {
+      const what = { removeText: 'Schrift weg', improve: 'Verbessern', brush: rec.brushKind === 'retouch' ? 'Nachmalen' : 'Objekt weg' }[rec.kind] || 'Bearbeitung';
+      el.resumeText.textContent = `„${what}“ für ${rec.name} wurde nicht fertig – vermutlich hat Android die App im Hintergrund beendet. Bereits berechnete Teile sind gespeichert.`;
+      const done = (v) => { el.resumeDlg.close(); resolve(v); };
+      el.resumeYes.onclick = () => done(true);
+      el.resumeNo.onclick = () => done(false);
+      el.resumeDlg.oncancel = (e) => { e.preventDefault(); done(null); };   // Zurück-Taste: später nochmal fragen
+      el.resumeDlg.showModal();
+    });
+  }
+  function restoreJob(rec) {
+    const { w, h } = rec;
+    for (const c of [el.cvOrig, el.cvResult]) { c.width = w; c.height = h; }
+    ctxO.putImageData(new ImageData(rec.original.data, w, h), 0, 0);
+    ctxR.putImageData(new ImageData(rec.current.data, w, h), 0, 0);
+    Object.assign(state, {
+      loaded: true, w, h, name: rec.name, type: rec.type, history: [],
+      text: rec.text ? { base: new ImageData(rec.text.base.data, w, h), mask: rec.text.mask, detect: rec.text.detect } : null,
+    });
+    showPhoto('');
+  }
+  async function checkResume() {
+    const rec = await resume.load();
+    if (!rec || rec.v !== 1 || !rec.original || !rec.current) return false;
+    const yes = await askResume(rec);
+    if (yes === null) return false;
+    if (!yes) { await resume.discard(); return false; }
+    try { restoreJob(rec); } catch (e) {
+      await resume.discard();
+      addMsg('ai', 'Die unterbrochene Bearbeitung ließ sich leider nicht wiederherstellen.', true);
+      return false;
+    }
+    addMsg('ai', 'Es geht an der Abbruchstelle weiter – schon berechnete Teile werden übersprungen.');
+    resume.resuming = true;
+    try {
+      if (rec.kind === 'removeText') await removeText(rec.auto);
+      else if (rec.kind === 'improve') await improve();
+      else if (rec.kind === 'brush') await doBrush(rec.brushKind, rec.brushMask);
+      else await resume.discard();
+    } finally { resume.resuming = false; }
+    return true;
+  }
+
   updateQualityLabel();
+  updateNotifyLabel();
   disableUI(false);
   defaultHint();
-  checkShared();
+  checkResume().catch(() => false).then((resumed) => checkShared(resumed));
   // angefangenen Download im WLAN automatisch fortsetzen
   refreshHQ().then(() => {
     const h = state.hq;

@@ -31,6 +31,8 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 | Qualität | Standard (MI-GAN, schnell) oder Höchste Qualität (LaMa, einmalig 208 MB, langsamer) unter „Mehr“ |
 | Reset | schließt das aktuelle Foto und zeigt wieder die leere Fläche (mit Rückfrage, wenn schon bearbeitet wurde) |
 | Bildschirm | bleibt an, solange gerechnet wird; die Ausschalttaste schaltet ihn trotzdem jederzeit aus |
+| Fortsetzen | beendet Android die App während einer Rekonstruktion, fragt sie beim nächsten Öffnen „Fortsetzen?“ und macht an der Abbruchstelle weiter – schon berechnete Bildteile werden übersprungen |
+| Hinweis, wenn fertig | unter „Mehr“ einschalten: Läuft die App im Hintergrund weiter, meldet sie sich per Benachrichtigung, sobald das Bild fertig ist |
 
 ## Aufbau
 
@@ -48,6 +50,8 @@ Die Rekonstruktionsmodelle werden beim ersten Gebrauch von Hugging Face geladen 
 
 Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wird mit Standard gearbeitet. Im Mobilfunknetz fragt die App vorher und kann den Download auf WLAN verschieben. Unter „Mehr“ steht, wie viel geladen ist und ob der App-Speicher dauerhaft gesichert ist. Ist er das nicht, darf Android ihn bei Speichermangel leeren – dann die App über das Chrome-Menü installieren.
 
+Für das Fortsetzen nach einem Abbruch legt die App vor jeder Rekonstruktion Foto und Markierung im App-Speicher ab und speichert jedes fertige Bildteil sofort. Nach Abschluss wird alles wieder gelöscht – auch diese Daten verlassen das Gerät nie.
+
 ## Grenzen
 
 - Rekonstruktion erfindet plausiblen Inhalt; bei Gesichtern, Schrift im Motiv oder feinen Strukturen kann sie danebenliegen.
@@ -55,7 +59,7 @@ Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wi
 - Fotos über 4096 Pixel Kantenlänge werden auf 4096 verkleinert.
 - Das Kommandofeld versteht die eingebauten Werkzeuge. Echtes Neu-Malen („Himmel als Sonnenuntergang“) ist nicht enthalten.
 - „Höchste Qualität“ braucht viel Arbeitsspeicher; auf älteren Handys kann es abbrechen – dann auf Standard zurückstellen.
-- Im Hintergrund (Bildschirm per Taste aus oder andere App geöffnet) rechnet die App nur eingeschränkt weiter: Chrome drosselt sie, friert sie nach einigen Minuten ein, und bei Speichermangel kann Android sie beenden.
+- Im Hintergrund (Bildschirm per Taste aus oder andere App geöffnet) rechnet die App nur eingeschränkt weiter: Chrome drosselt sie und friert sie nach einigen Minuten ein – dann geht es weiter, sobald du zurückkommst. Beendet Android sie bei Speichermangel, setzt sie beim nächsten Öffnen an der Abbruchstelle fort. Der Verlauf für „Rückgängig“ reicht danach nur bis zum Stand vor dem unterbrochenen Schritt.
 
 ## Drittanbieter
 

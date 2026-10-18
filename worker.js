@@ -208,19 +208,42 @@ async function getSession(key) {
   return sessions[key];
 }
 
+// ---------------------------------------------------------------- Zwischenstände
+/* Während eines fortsetzbaren Auftrags wird jedes Ergebnis eines Modellaufrufs (Schriftsuche,
+   jede Kachel der Rekonstruktion) sofort auf dem Gerät gespeichert – adressiert über eine
+   Prüfsumme der Eingabe. Wird der Auftrag nach einem Abbruch wiederholt, kommen gleiche
+   Schritte direkt aus dem Speicher. Die Oberfläche löscht alles, sobald der Auftrag fertig ist. */
+let cacheOn = false;
+async function cached(kind, parts, compute) {
+  if (!cacheOn) return compute();
+  const db = await BT.resumeDb();
+  if (!db) return compute();
+  const key = kind + ':' + BT.hashData(parts);
+  try {
+    const hit = await BT.idbTx(db, 'calls', 'readonly', (s) => s.calls.get(key));
+    if (hit) return hit;
+  } catch (e) { /* dann eben neu rechnen */ }
+  const out = await compute();
+  // put() kopiert die Daten sofort; auf das Schreiben selbst muss nicht gewartet werden
+  if (cacheOn) BT.idbTx(db, 'calls', 'readwrite', (s) => s.calls.put(out, key)).catch(() => {});
+  return out;
+}
+
 // ---------------------------------------------------------------- KI-Schritte
 async function detectMask(img, opt) {
   const det = await getSession('det');
   status('Schrift wird gesucht …', null);
   const inp = BT.detInput(img, 1280);
-  const out = await det.run({ [det.inputNames[0]]: new ort.Tensor('float32', inp.data, [1, 3, inp.height, inp.width]) });
-  const prob = out[det.outputNames[0]].data;
+  const prob = await cached(`det${inp.width}x${inp.height}`, [inp.data], async () => {
+    const out = await det.run({ [det.inputNames[0]]: new ort.Tensor('float32', inp.data, [1, 3, inp.height, inp.width]) });
+    return new Float32Array(out[det.outputNames[0]].data);
+  });
   return BT.textMaskFromProb(prob, inp.width, inp.height, img.width, img.height, opt);
 }
 
 function modelRunner(key, sess) {
   if (key === 'lama') {
-    return async (crop, cmask) => {
+    return (crop, cmask) => cached(`lama${crop.width}x${crop.height}`, [crop.data, cmask], async () => {
       const f = BT.lamaFeeds(crop, cmask, 512);
       const out = await sess.run({
         [sess.inputNames[0]]: new ort.Tensor('float32', f.image, [1, 3, 512, 512]),
@@ -228,16 +251,16 @@ function modelRunner(key, sess) {
       });
       const small = BT.fromCHW(out[sess.outputNames[0]].data, 512, 512, 1);
       return BT.resizeRGBA(small, crop.width, crop.height);
-    };
+    });
   }
-  return async (crop, cmask) => {
+  return (crop, cmask) => cached(`migan${crop.width}x${crop.height}`, [crop.data, cmask], async () => {
     const f = BT.miganFeeds(crop, cmask);
     const out = await sess.run({
       [sess.inputNames[0]]: new ort.Tensor('uint8', f.image, [1, 3, crop.height, crop.width]),
       [sess.inputNames[1]]: new ort.Tensor('uint8', f.mask, [1, 1, crop.height, crop.width]),
     });
     return BT.fromCHW(out[sess.outputNames[0]].data, crop.width, crop.height);
-  };
+  });
 }
 
 let lamaBroken = false;
@@ -359,7 +382,8 @@ const handlers = {
 
 self.onmessage = async (e) => {
   const m = e.data;
-  if (!['modelStatus', 'download', 'cancelDownload'].includes(m.cmd)) currentJob = m.id;
+  const background = ['modelStatus', 'download', 'cancelDownload'].includes(m.cmd);
+  if (!background) { currentJob = m.id; cacheOn = !!m.resume; }
   try {
     const h = handlers[m.cmd];
     if (!h) throw new Error('Unbekannter Auftrag: ' + m.cmd);
@@ -370,6 +394,8 @@ self.onmessage = async (e) => {
     reply(m.id, img, extra);
   } catch (err) {
     post({ type: 'error', id: m.id, message: (err && err.message) || String(err) });
+  } finally {
+    if (!background && currentJob === m.id) cacheOn = false;
   }
 };
 post({ type: 'ready', threads: ort.env.wasm.numThreads, isolated: self.crossOriginIsolated });

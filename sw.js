@@ -2,8 +2,9 @@
    - hält die App offline verfügbar
    - setzt die Header für "Cross-Origin Isolation", damit die KI mehrere Prozessorkerne nutzen kann
    - nimmt Fotos aus dem Android-Teilen-Menü entgegen
+   - öffnet die App, wenn die Benachrichtigung „Bild fertig“ angetippt wird
    KI-Modelle (.onnx) verwaltet worker.js selbst im Cache "bt-models-v1". */
-const VERSION = 'bt-app-v6';
+const VERSION = 'bt-app-v7';
 const SHELL = [
   './', './index.html', './app.js', './worker.js', './core.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png',
@@ -73,5 +74,15 @@ self.addEventListener('fetch', (e) => {
     if (hit) { e.waitUntil(refresh); return withIsolation(hit); }
     const net = await refresh;
     return withIsolation(net || new Response('offline', { status: 503 }));
+  })());
+});
+
+// Benachrichtigung „Bild fertig“ angetippt: offene App nach vorn holen, sonst öffnen
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of wins) { if ('focus' in c) { try { return await c.focus(); } catch (err) { /* nächstes Fenster */ } } }
+    return self.clients.openWindow(new URL('./', self.registration.scope).href);
   })());
 });

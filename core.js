@@ -810,6 +810,74 @@
     return img;
   };
 
+  // ---------------------------------------------------------------- Fortsetzen nach Abbruch
+  /* Datenbank "bt-resume" (nur auf dem Gerät):
+     - job:   der laufende Auftrag (Foto, Markierung, Art) – solange er läuft
+     - calls: Ergebnisse einzelner Rechenschritte, adressiert über eine Prüfsumme ihrer Eingabe.
+       Wird ein Auftrag nach einem Abbruch wiederholt, liefern gleiche Eingaben das gespeicherte
+       Ergebnis sofort – abweichende Eingaben werden einfach neu berechnet. */
+  BT.resumeDb = function () {
+    if (BT._rdb) return BT._rdb;
+    BT._rdb = new Promise((resolve) => {
+      let r;
+      try { r = indexedDB.open('bt-resume', 1); } catch (e) { resolve(null); return; }
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains('job')) db.createObjectStore('job');
+        if (!db.objectStoreNames.contains('calls')) db.createObjectStore('calls');
+      };
+      r.onsuccess = () => { const db = r.result; db.onversionchange = () => db.close(); resolve(db); };
+      r.onerror = () => resolve(null);
+      r.onblocked = () => resolve(null);
+    });
+    return BT._rdb;
+  };
+  /* Eine Transaktion; fn(stores) stellt Anfragen, das Ergebnis der letzten zurückgegebenen
+     Anfrage wird nach dem Abschluss geliefert. */
+  BT.idbTx = function (db, names, mode, fn) {
+    return new Promise((resolve, reject) => {
+      let tx;
+      try { tx = db.transaction(names, mode); } catch (e) { reject(e); return; }
+      const stores = {};
+      for (const n of [].concat(names)) stores[n] = tx.objectStore(n);
+      let val, req;
+      try { req = fn(stores); } catch (e) { try { tx.abort(); } catch (x) { /* schon beendet */ } reject(e); return; }
+      if (req) req.onsuccess = () => { val = req.result; };
+      tx.oncomplete = () => resolve(val);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('abgebrochen'));
+    });
+  };
+  // Zwei unabhängige 32-Bit-Prüfsummen (Murmur3-Mischung) über mehrere Byte-Folgen
+  BT.hashData = function (parts) {
+    let h1 = 0x2f9a3c71 | 0, h2 = 0x6b43a9b5 | 0;
+    const mix = (h, k, c1, c2) => {
+      k = Math.imul(k, c1); k = (k << 15) | (k >>> 17); k = Math.imul(k, c2);
+      h ^= k; h = (h << 13) | (h >>> 19);
+      return (Math.imul(h, 5) + 0xe6546b64) | 0;
+    };
+    for (const p of parts) {
+      const u8 = p instanceof Uint8Array || p instanceof Uint8ClampedArray ? p : new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
+      const n4 = u8.byteOffset % 4 === 0 ? u8.length >> 2 : 0;
+      if (n4) {
+        const u32 = new Uint32Array(u8.buffer, u8.byteOffset, n4);
+        for (let i = 0; i < n4; i++) {
+          const k = u32[i];
+          h1 = mix(h1, k, 0xcc9e2d51, 0x1b873593);
+          h2 = mix(h2, k, 0x85ebca6b, 0xc2b2ae35);
+        }
+      }
+      for (let i = n4 * 4; i < u8.length; i++) {
+        h1 = mix(h1, u8[i], 0xcc9e2d51, 0x1b873593);
+        h2 = mix(h2, u8[i], 0x85ebca6b, 0xc2b2ae35);
+      }
+      h1 = mix(h1, u8.length, 0xcc9e2d51, 0x1b873593);
+      h2 = mix(h2, u8.length, 0x85ebca6b, 0xc2b2ae35);
+    }
+    const fin = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return (h >>> 0).toString(36); };
+    return fin(h1) + '-' + fin(h2);
+  };
+
   if (typeof module !== 'undefined' && module.exports) module.exports = BT;
   root.BT = BT;
 })(typeof self !== 'undefined' ? self : globalThis);
