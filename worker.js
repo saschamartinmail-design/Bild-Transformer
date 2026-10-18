@@ -278,6 +278,8 @@ async function inpaint(img, mask, quality, opt) {
   const o = Object.assign({ win: key === 'lama' ? 768 : 1024 }, opt || {});
   o.onProgress = (i, n) => status(n > 1 ? `Bild wird rekonstruiert (${i} von ${n})` : 'Bild wird rekonstruiert …', n > 1 ? i / n : null);
   status('Bild wird rekonstruiert …', null);
+  // Gemalte Flächen (Objekt weg): als Ganzes füllen, damit große Objekte stimmig ersetzt werden
+  if (o.large) return BT.inpaintLarge(img, mask, modelRunner(key, sess), { onProgress: o.onProgress });
   return BT.inpaintTiles(img, mask, modelRunner(key, sess), o);
 }
 
@@ -371,7 +373,7 @@ const handlers = {
       const fin = await cleanupPass(sm.image, sm.mask, m.quality);
       return [fin.image, { mask: fin.mask, reversed: sm.reversed }];
     }
-    const res = await inpaint(img, mask, m.quality, {});
+    const res = await inpaint(img, mask, m.quality, { large: !!m.brush });
     return [res, { mask }];
   },
   async filter(m) {

@@ -129,15 +129,12 @@
       if (j >= w) push(j - w);
       if (j < n - w) push(j + w);
     }
-    const out = BT.dilate(mask, w, h, Math.max(2, Math.round(0.004 * side)));
-    const holes = new Uint8Array(n);
-    let any = false;
-    for (let i = 0; i < n; i++) if (!closed[i] && !outside[i]) { holes[i] = 1; any = true; }
-    if (!any) return out;
-    // Die Innenfläche ist durch das Schließen um „gap“ geschrumpft – wieder bis an die Linie ausdehnen
-    const inner = BT.dilate(holes, w, h, gap + 1);
-    for (let i = 0; i < n; i++) if (inner[i]) out[i] = 1;
-    return out;
+    /* „Außen“ wieder bis an die Linie heranführen. Innen ist dann alles, was weder Linie noch außen ist –
+       auch ein schmales Inneres, das beim Schließen ganz zugelaufen wäre (dicker Pinsel, enger Kreis). */
+    const near = BT.dilate(outside, w, h, gap + 2);
+    const full = new Uint8Array(mask);
+    for (let i = 0; i < n; i++) if (!mask[i] && !near[i]) full[i] = 1;
+    return BT.dilate(full, w, h, Math.max(2, Math.round(0.004 * side)));
   };
 
   // Zusammenhängende Bereiche einer Maske nummerieren (4er-Nachbarschaft) -> {labels, count}
@@ -510,6 +507,66 @@
         todo[gi] = 0;
       }
       if (opt.onProgress) opt.onProgress(t + 1, tiles.length);
+    }
+    return out;
+  };
+
+  /* Große Flächen (z. B. ein eingekreistes Objekt) als Ganzes füllen statt kachelweise: Bei großen Löchern
+     hätten einzelne Kacheln kaum Bezug zur Umgebung, und das Modell erfindet Fantasie-Strukturen.
+     Je zusammenhängender Fläche wird ein Ausschnitt mit reichlich Umgebung so verkleinert, dass das Loch
+     höchstens ca. 64 px dick ist (Arbeitsgröße 512–1024 px), in einem Durchgang gefüllt und wieder vergrößert.
+     Kleine Flächen bleiben dabei in voller Auflösung. */
+  BT.inpaintLarge = async function (img, mask, runModel, opt) {
+    opt = Object.assign({ minSide: 512, maxSide: 1024, thick: 64, onProgress: null }, opt || {});
+    const W = img.width, H = img.height, n = W * H;
+    const out = BT.cloneImage(img);
+    const { labels, count } = BT.labelComponents(mask, W, H);
+    if (!count) return out;
+    // Dicke je Fläche: größter Abstand eines Lochpixels zum nächsten bekannten Pixel
+    const inv = new Uint8Array(n);
+    for (let i = 0; i < n; i++) inv[i] = mask[i] ? 0 : 1;
+    const { dist } = chamfer(inv, W, H);
+    const box = [];
+    for (let k = 0; k <= count; k++) box.push({ x0: W, y0: H, x1: -1, y1: -1, t: 0 });
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const l = labels[y * W + x];
+      if (!l) continue;
+      const b = box[l];
+      if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x; if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y;
+      const d = dist[y * W + x] / 3; if (d > b.t) b.t = d;
+    }
+    const todo = new Uint8Array(mask);
+    for (let k = 1; k <= count; k++) {
+      const b = box[k];
+      const pad = Math.max(64, Math.round(0.5 * Math.max(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1)));
+      const cx0 = Math.max(0, b.x0 - pad), cy0 = Math.max(0, b.y0 - pad);
+      const cx1 = Math.min(W - 1, b.x1 + pad), cy1 = Math.min(H - 1, b.y1 + pad);
+      const cw = cx1 - cx0 + 1, ch = cy1 - cy0 + 1, M = Math.max(cw, ch);
+      const s = Math.min(1, opt.maxSide / M, Math.max(opt.minSide / M, opt.thick / Math.max(1, b.t)));
+      const sw = Math.max(16, Math.round(cw * s)), sh = Math.max(16, Math.round(ch * s));
+      const cImg = BT.cropImage(out, cx0, cy0, cw, ch);
+      const cMask = new Uint8Array(cw * ch);
+      let any = false;
+      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) if (todo[(cy0 + y) * W + cx0 + x]) { cMask[y * cw + x] = 1; any = true; }
+      if (any) {
+        let res;
+        if (s >= 1) res = await runModel(BT.prefill(cImg, cMask), cMask);
+        else {
+          const sm = BT.resizeGray(cMask, cw, ch, sw, sh);
+          const sMask = new Uint8Array(sw * sh);
+          for (let i = 0; i < sw * sh; i++) sMask[i] = sm[i] > 0.01 ? 1 : 0;
+          const small = BT.resizeRGBA(BT.prefill(cImg, cMask), sw, sh);
+          res = BT.resizeRGBA(await runModel(BT.prefill(small, sMask), sMask), cw, ch);
+        }
+        for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+          const gi = (cy0 + y) * W + cx0 + x;
+          if (!todo[gi]) continue;
+          const li = (y * cw + x) * 4, go = gi * 4;
+          out.data[go] = res.data[li]; out.data[go + 1] = res.data[li + 1]; out.data[go + 2] = res.data[li + 2];
+          todo[gi] = 0;
+        }
+      }
+      if (opt.onProgress) opt.onProgress(k, count);
     }
     return out;
   };

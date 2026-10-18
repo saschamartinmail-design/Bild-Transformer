@@ -24,6 +24,7 @@
   };
   const ctxO = el.cvOrig.getContext('2d', { willReadFrequently: true });
   const ctxR = el.cvResult.getContext('2d', { willReadFrequently: true });
+  const APP_VERSION = 8;   // bei jedem Update zusammen mit VERSION in sw.js erhöhen
   const ctxM = el.cvMask.getContext('2d', { willReadFrequently: true });
 
   const store = {
@@ -53,6 +54,7 @@
     if (m.fellBack) noteFallback();
     if (m.type === 'ready') {
       el.engineInfo.textContent = `Rechenkern bereit · ${m.threads} Thread${m.threads > 1 ? 's' : ''}${m.isolated ? '' : ' (Einzelthread-Modus)'}`;
+      el.engineInfo.textContent += ` · App-Version ${APP_VERSION}`;
       return;
     }
     const p = pending.get(m.id);

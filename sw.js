@@ -4,7 +4,7 @@
    - nimmt Fotos aus dem Android-Teilen-Menü entgegen
    - öffnet die App, wenn die Benachrichtigung „Bild fertig“ angetippt wird
    KI-Modelle (.onnx) verwaltet worker.js selbst im Cache "bt-models-v1". */
-const VERSION = 'bt-app-v7';
+const VERSION = 'bt-app-v8';   // zusammen mit APP_VERSION in app.js erhöhen
 const SHELL = [
   './', './index.html', './app.js', './worker.js', './core.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png',
