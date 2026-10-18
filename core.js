@@ -135,6 +135,34 @@
     return out;
   };
 
+  /* Pinselmaske für „Objekt weg“ / „Nachmalen“ aufbereiten:
+     1. Eingekreiste Flächen werden mitgefüllt – wer einen Kreis um ein Objekt malt, meint den Inhalt,
+        nicht nur die Linie. Kleine Lücken im Kreis (bis ca. 3 % der Bildkante) werden dabei geschlossen.
+     2. Ein schmaler Rand kommt dazu, damit Kanten, Schatten und Kantenglättung des Objekts mit verschwinden. */
+  BT.prepareBrushMask = function (mask, w, h) {
+    const n = w * h, side = Math.max(w, h), gap = Math.max(4, Math.round(0.015 * side));
+    const closed = BT.dilate(mask, w, h, gap);
+    // Alles, was vom Bildrand aus erreichbar ist, ohne die (geschlossene) Linie zu kreuzen, ist „außen“
+    const outside = new Uint8Array(n), stack = new Int32Array(n);
+    let sp = 0;
+    const push = (i) => { if (!closed[i] && !outside[i]) { outside[i] = 1; stack[sp++] = i; } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (sp) {
+      const j = stack[--sp], x = j % w;
+      if (x > 0) push(j - 1);
+      if (x < w - 1) push(j + 1);
+      if (j >= w) push(j - w);
+      if (j < n - w) push(j + w);
+    }
+    /* „Außen“ wieder bis an die Linie heranführen. Innen ist dann alles, was weder Linie noch außen ist –
+       auch ein schmales Inneres, das beim Schließen ganz zugelaufen wäre (dicker Pinsel, enger Kreis). */
+    const near = BT.dilate(outside, w, h, gap + 2);
+    const full = new Uint8Array(mask);
+    for (let i = 0; i < n; i++) if (!mask[i] && !near[i]) full[i] = 1;
+    return BT.dilate(full, w, h, Math.max(2, Math.round(0.004 * side)));
+  };
+
   // Zusammenhängende Bereiche einer Maske nummerieren (4er-Nachbarschaft) -> {labels, count}
   BT.labelComponents = function (mask, w, h) {
     const labels = new Int32Array(w * h), stack = [];
@@ -543,6 +571,66 @@
     return out;
   };
 
+  /* Große Flächen (z. B. ein eingekreistes Objekt) als Ganzes füllen statt kachelweise: Bei großen Löchern
+     hätten einzelne Kacheln kaum Bezug zur Umgebung, und das Modell erfindet Fantasie-Strukturen.
+     Je zusammenhängender Fläche wird ein Ausschnitt mit reichlich Umgebung so verkleinert, dass das Loch
+     höchstens ca. 64 px dick ist (Arbeitsgröße 512–1024 px), in einem Durchgang gefüllt und wieder vergrößert.
+     Kleine Flächen bleiben dabei in voller Auflösung. */
+  BT.inpaintLarge = async function (img, mask, runModel, opt) {
+    opt = Object.assign({ minSide: 512, maxSide: 1024, thick: 64, onProgress: null }, opt || {});
+    const W = img.width, H = img.height, n = W * H;
+    const out = BT.cloneImage(img);
+    const { labels, count } = BT.labelComponents(mask, W, H);
+    if (!count) return out;
+    // Dicke je Fläche: größter Abstand eines Lochpixels zum nächsten bekannten Pixel
+    const inv = new Uint8Array(n);
+    for (let i = 0; i < n; i++) inv[i] = mask[i] ? 0 : 1;
+    const { dist } = chamfer(inv, W, H);
+    const box = [];
+    for (let k = 0; k <= count; k++) box.push({ x0: W, y0: H, x1: -1, y1: -1, t: 0 });
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const l = labels[y * W + x];
+      if (!l) continue;
+      const b = box[l];
+      if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x; if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y;
+      const d = dist[y * W + x] / 3; if (d > b.t) b.t = d;
+    }
+    const todo = new Uint8Array(mask);
+    for (let k = 1; k <= count; k++) {
+      const b = box[k];
+      const pad = Math.max(64, Math.round(0.5 * Math.max(b.x1 - b.x0 + 1, b.y1 - b.y0 + 1)));
+      const cx0 = Math.max(0, b.x0 - pad), cy0 = Math.max(0, b.y0 - pad);
+      const cx1 = Math.min(W - 1, b.x1 + pad), cy1 = Math.min(H - 1, b.y1 + pad);
+      const cw = cx1 - cx0 + 1, ch = cy1 - cy0 + 1, M = Math.max(cw, ch);
+      const s = Math.min(1, opt.maxSide / M, Math.max(opt.minSide / M, opt.thick / Math.max(1, b.t)));
+      const sw = Math.max(16, Math.round(cw * s)), sh = Math.max(16, Math.round(ch * s));
+      const cImg = BT.cropImage(out, cx0, cy0, cw, ch);
+      const cMask = new Uint8Array(cw * ch);
+      let any = false;
+      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) if (todo[(cy0 + y) * W + cx0 + x]) { cMask[y * cw + x] = 1; any = true; }
+      if (any) {
+        let res;
+        if (s >= 1) res = await runModel(BT.prefill(cImg, cMask), cMask);
+        else {
+          const sm = BT.resizeGray(cMask, cw, ch, sw, sh);
+          const sMask = new Uint8Array(sw * sh);
+          for (let i = 0; i < sw * sh; i++) sMask[i] = sm[i] > 0.01 ? 1 : 0;
+          const small = BT.resizeRGBA(BT.prefill(cImg, cMask), sw, sh);
+          res = BT.resizeRGBA(await runModel(BT.prefill(small, sMask), sMask), cw, ch);
+        }
+        for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+          const gi = (cy0 + y) * W + cx0 + x;
+          if (!todo[gi]) continue;
+          const li = (y * cw + x) * 4, go = gi * 4;
+          out.data[go] = res.data[li]; out.data[go + 1] = res.data[li + 1]; out.data[go + 2] = res.data[li + 2];
+          todo[gi] = 0;
+        }
+      }
+      if (opt.onProgress) opt.onProgress(k, count);
+    }
+    return out;
+  };
+
   /* Maskierte Pixel vorab mit weich gemittelten Umgebungsfarben füllen ("Push-Pull").
      Das Modell verkleinert intern und sieht dabei Randpixel des Lochs – ohne Vorfüllung
      würden Reste der Schriftfarbe in die Rekonstruktion durchsickern. */
@@ -837,6 +925,74 @@
       case 'hue': return BT.hueFilter(img, a.hue, a.mode);
     }
     return img;
+  };
+
+  // ---------------------------------------------------------------- Fortsetzen nach Abbruch
+  /* Datenbank "bt-resume" (nur auf dem Gerät):
+     - job:   der laufende Auftrag (Foto, Markierung, Art) – solange er läuft
+     - calls: Ergebnisse einzelner Rechenschritte, adressiert über eine Prüfsumme ihrer Eingabe.
+       Wird ein Auftrag nach einem Abbruch wiederholt, liefern gleiche Eingaben das gespeicherte
+       Ergebnis sofort – abweichende Eingaben werden einfach neu berechnet. */
+  BT.resumeDb = function () {
+    if (BT._rdb) return BT._rdb;
+    BT._rdb = new Promise((resolve) => {
+      let r;
+      try { r = indexedDB.open('bt-resume', 1); } catch (e) { resolve(null); return; }
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains('job')) db.createObjectStore('job');
+        if (!db.objectStoreNames.contains('calls')) db.createObjectStore('calls');
+      };
+      r.onsuccess = () => { const db = r.result; db.onversionchange = () => db.close(); resolve(db); };
+      r.onerror = () => resolve(null);
+      r.onblocked = () => resolve(null);
+    });
+    return BT._rdb;
+  };
+  /* Eine Transaktion; fn(stores) stellt Anfragen, das Ergebnis der letzten zurückgegebenen
+     Anfrage wird nach dem Abschluss geliefert. */
+  BT.idbTx = function (db, names, mode, fn) {
+    return new Promise((resolve, reject) => {
+      let tx;
+      try { tx = db.transaction(names, mode); } catch (e) { reject(e); return; }
+      const stores = {};
+      for (const n of [].concat(names)) stores[n] = tx.objectStore(n);
+      let val, req;
+      try { req = fn(stores); } catch (e) { try { tx.abort(); } catch (x) { /* schon beendet */ } reject(e); return; }
+      if (req) req.onsuccess = () => { val = req.result; };
+      tx.oncomplete = () => resolve(val);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('abgebrochen'));
+    });
+  };
+  // Zwei unabhängige 32-Bit-Prüfsummen (Murmur3-Mischung) über mehrere Byte-Folgen
+  BT.hashData = function (parts) {
+    let h1 = 0x2f9a3c71 | 0, h2 = 0x6b43a9b5 | 0;
+    const mix = (h, k, c1, c2) => {
+      k = Math.imul(k, c1); k = (k << 15) | (k >>> 17); k = Math.imul(k, c2);
+      h ^= k; h = (h << 13) | (h >>> 19);
+      return (Math.imul(h, 5) + 0xe6546b64) | 0;
+    };
+    for (const p of parts) {
+      const u8 = p instanceof Uint8Array || p instanceof Uint8ClampedArray ? p : new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
+      const n4 = u8.byteOffset % 4 === 0 ? u8.length >> 2 : 0;
+      if (n4) {
+        const u32 = new Uint32Array(u8.buffer, u8.byteOffset, n4);
+        for (let i = 0; i < n4; i++) {
+          const k = u32[i];
+          h1 = mix(h1, k, 0xcc9e2d51, 0x1b873593);
+          h2 = mix(h2, k, 0x85ebca6b, 0xc2b2ae35);
+        }
+      }
+      for (let i = n4 * 4; i < u8.length; i++) {
+        h1 = mix(h1, u8[i], 0xcc9e2d51, 0x1b873593);
+        h2 = mix(h2, u8[i], 0x85ebca6b, 0xc2b2ae35);
+      }
+      h1 = mix(h1, u8.length, 0xcc9e2d51, 0x1b873593);
+      h2 = mix(h2, u8.length, 0x85ebca6b, 0xc2b2ae35);
+    }
+    const fin = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return (h >>> 0).toString(36); };
+    return fin(h1) + '-' + fin(h2);
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = BT;

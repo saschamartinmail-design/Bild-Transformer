@@ -23,13 +23,16 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 |---|---|
 | Schrift | automatische Erkennung (auch schräg), zusätzliche Suche nach blasser Schrift, Rekonstruktion in voller Auflösung, „Verbessern“ für einen zweiten Durchgang, „Nachmalen“ für übersehene Stellen |
 | Transparente Schrift | Farbe und Deckkraft werden geschätzt und die Schrift herausgerechnet – das Foto darunter bleibt erhalten statt neu erfunden zu werden (bis ca. 65 % Deckkraft; stärker deckende Schrift wird rekonstruiert) |
-| Objekte | „Objekt weg“: übermalen und entfernen lassen |
+| Objekte | „Objekt weg“: Objekt übermalen oder einkreisen – die markierte Fläche (auch das Innere eines Kreises) wird mit passendem Hintergrund aufgefüllt; danach zeigt der Regler das ganze Ergebnis |
 | Korrektur | Auto, Heller/Dunkler, Kontrast, Wärmer/Kälter, Schärfer/Weicher, Kräftiger/Blasser |
 | Stil | Retro (Sepia, Körnung, Vignette), Schwarzweiß, kontrastreiches Schwarzweiß |
 | Farbe | Farbton antippen und entfernen, „Nur eine Farbe behalten“, Farbstich entfernen (per Kommando) |
 | Kommandos | freie Sätze wie „etwas wärmer und das Rot raus“, „deutlich heller, mehr Kontrast“, „nur Blau behalten“, „Gelbstich entfernen“, „Retro-Look“, „rückgängig“, „zurück zum Original“ |
 | Qualität | Standard (MI-GAN, schnell) oder Höchste Qualität (LaMa, einmalig 208 MB, langsamer; nur auf Geräten mit mindestens 8 GB Arbeitsspeicher) unter „Mehr“ |
 | Reset | schließt das aktuelle Foto und zeigt wieder die leere Fläche (mit Rückfrage, wenn schon bearbeitet wurde) |
+| Bildschirm | bleibt an, solange gerechnet wird; die Ausschalttaste schaltet ihn trotzdem jederzeit aus. Lehnt das Handy das ab (z. B. im Energiesparmodus), sagt die App Bescheid |
+| Fortsetzen | beendet Android die App während einer Rekonstruktion, fragt sie beim nächsten Öffnen „Fortsetzen?“ und macht an der Abbruchstelle weiter – schon berechnete Bildteile werden übersprungen |
+| Hinweis, wenn fertig | unter „Mehr“ einschalten: Läuft die App im Hintergrund weiter, meldet sie sich per Benachrichtigung, sobald das Bild fertig ist |
 
 ## Aufbau
 
@@ -46,7 +49,9 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 
 Die Rekonstruktionsmodelle werden beim ersten Gebrauch von Hugging Face geladen (Ersatz: jsDelivr/unpkg) und dauerhaft im Browser gespeichert – in Teilen zu 4 MB, jeder Teil sofort. Bricht die Verbindung ab, wird an der Abbruchstelle fortgesetzt (automatisch bis zu 6 Versuche, danach beim nächsten Start); bereits geladene Daten werden nie erneut übertragen.
 
-Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wird mit Standard gearbeitet. Im Mobilfunknetz fragt die App vorher und kann den Download auf WLAN verschieben. Unter „Mehr“ steht, wie viel geladen ist und ob der App-Speicher dauerhaft gesichert ist. Ist er das nicht, darf Android ihn bei Speichermangel leeren – dann die App über das Chrome-Menü installieren.
+Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wird mit Standard gearbeitet. Im Mobilfunknetz fragt die App vorher und kann den Download auf WLAN verschieben. Unter „Mehr“ steht, wie viel geladen ist, ob der App-Speicher dauerhaft gesichert ist und welche App-Version läuft. Nach einem Update reicht es, die App einmal zu schließen und neu zu öffnen. Ist er das nicht, darf Android ihn bei Speichermangel leeren – dann die App über das Chrome-Menü installieren.
+
+Für das Fortsetzen nach einem Abbruch legt die App vor jeder Rekonstruktion Foto und Markierung im App-Speicher ab und speichert jedes fertige Bildteil sofort. Nach Abschluss wird alles wieder gelöscht – auch diese Daten verlassen das Gerät nie.
 
 ## Arbeitsspeicher
 
@@ -67,6 +72,7 @@ Bildverarbeitungsschritte arbeiten nur noch im Bereich der Schrift statt auf Kop
 - Fotos über 4096 Pixel Kantenlänge werden auf 4096 verkleinert.
 - Das Kommandofeld versteht die eingebauten Werkzeuge. Echtes Neu-Malen („Himmel als Sonnenuntergang“) ist nicht enthalten.
 - „Höchste Qualität“ braucht kurzzeitig rund 1 GB Arbeitsspeicher und ist erst ab 8 GB (laut Browser) freigegeben. Scheitert es trotzdem, schaltet die App automatisch auf Standard um.
+- Im Hintergrund (Bildschirm per Taste aus oder andere App geöffnet) rechnet die App nur eingeschränkt weiter: Chrome drosselt sie und friert sie nach einigen Minuten ein – dann geht es weiter, sobald du zurückkommst. Beendet Android sie bei Speichermangel, setzt sie beim nächsten Öffnen an der Abbruchstelle fort. Der Verlauf für „Rückgängig“ reicht danach nur bis zum Stand vor dem unterbrochenen Schritt.
 
 ## Drittanbieter
 
