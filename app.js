@@ -24,7 +24,7 @@
   };
   const ctxO = el.cvOrig.getContext('2d', { willReadFrequently: true });
   const ctxR = el.cvResult.getContext('2d', { willReadFrequently: true });
-  const APP_VERSION = 8;   // bei jedem Update zusammen mit VERSION in sw.js erhöhen
+  const APP_VERSION = 9;   // bei jedem Update zusammen mit VERSION in sw.js erhöhen
   const ctxM = el.cvMask.getContext('2d', { willReadFrequently: true });
 
   const store = {
@@ -119,15 +119,24 @@
   // Die Ausschalttaste wirkt weiterhin normal; danach gibt der Browser die Sperre frei.
   // Kommt man zurück und es wird noch gerechnet, wird sie neu angefordert.
   const screenLock = {
-    sentinel: null,
+    sentinel: null, warned: false,
     async on() {
-      if (!('wakeLock' in navigator) || this.sentinel || document.visibilityState !== 'visible') return;
+      if (this.sentinel || document.visibilityState !== 'visible') return;
+      if (!('wakeLock' in navigator)) { this.warn('Dieser Browser kann den Bildschirm nicht anlassen.'); return; }
       try {
         const s = await navigator.wakeLock.request('screen');
         if (!state.busy) { s.release().catch(() => {}); return; }   // Berechnung war schon fertig
         this.sentinel = s;
         s.addEventListener('release', () => { if (this.sentinel === s) this.sentinel = null; });
-      } catch (e) { /* z. B. Energiesparmodus: dann eben ohne */ }
+      } catch (e) {
+        this.warn('Das Handy hat das Anlassen des Bildschirms abgelehnt' + (e && e.name === 'NotAllowedError' ? ', oft wegen des Energiesparmodus.' : '.'));
+      }
+    },
+    // einmal pro Sitzung melden, damit klar ist, warum der Bildschirm doch ausgeht
+    warn(text) {
+      if (this.warned) return;
+      this.warned = true;
+      addMsg('ai', text + ' Der Bildschirm kann sich deshalb während der Berechnung ausschalten.');
     },
     off() {
       const s = this.sentinel;
@@ -208,9 +217,10 @@
     },
   };
   function updateNotifyLabel() {
+    if (!el.notifyToggle) return;
     el.notifyToggle.textContent = 'Hinweis, wenn fertig: ' + (notify.on() ? 'An' : 'Aus');
   }
-  function notifyInfo(text) { el.notifyInfo.textContent = text || ''; el.notifyInfo.hidden = !text; }
+  function notifyInfo(text) { if (!el.notifyInfo) return; el.notifyInfo.textContent = text || ''; el.notifyInfo.hidden = !text; }
   async function toggleNotify() {
     notifyInfo('');
     if (!notify.supported) { notifyInfo('Dieser Browser kann keine Benachrichtigungen anzeigen.'); return; }
@@ -836,6 +846,7 @@
 
   // Unterbrochene Bearbeitung wiederherstellen und fortsetzen
   function askResume(rec) {
+    if (!el.resumeDlg) return Promise.resolve(null);
     return new Promise((resolve) => {
       const what = { removeText: 'Schrift weg', improve: 'Verbessern', brush: rec.brushKind === 'retouch' ? 'Nachmalen' : 'Objekt weg' }[rec.kind] || 'Bearbeitung';
       el.resumeText.textContent = `„${what}“ für ${rec.name} wurde nicht fertig – vermutlich hat Android die App im Hintergrund beendet. Bereits berechnete Teile sind gespeichert.`;
@@ -879,6 +890,7 @@
     return true;
   }
 
+  if (!el.engineInfo.textContent) el.engineInfo.textContent = `App-Version ${APP_VERSION}`;
   updateQualityLabel();
   updateNotifyLabel();
   disableUI(false);

@@ -100,23 +100,34 @@ async function loadCached(key) {
 // Lädt eine URL fortsetzbar in Teilen. onProgress(got, total)
 async function downloadResumable(url, onProgress, signal) {
   const cache = await caches.open(MODEL_CACHE);
-  let meta = (await readMeta(cache, url)) || { total: 0, parts: 0, bytes: 0, done: false };
+  const fresh = () => ({ total: 0, parts: 0, bytes: 0, done: false });
+  let meta = (await readMeta(cache, url)) || fresh();
   if (meta.done) return;
-  let fails = 0;
+  let fails = 0, restarts = 0;
+  const restart = async () => {                        // angefangene Teile verwerfen, von vorn laden
+    await clearParts(cache, url);
+    meta = fresh();
+    if (++restarts > 3) throw new Error('Server unterstützt kein Fortsetzen');
+  };
   for (;;) {
+    // Komprimiert gelieferte Dateien lassen sich nicht per Range fortsetzen; ebenso ein Stand,
+    // der größer ist als die angekündigte Größe (Überbleibsel älterer Versionen) -> neu beginnen
+    if (meta.bytes && (meta.enc || (meta.total && meta.bytes > meta.total))) await restart();
     const start = meta.bytes;
     let progressed = false;
     try {
       const res = await fetch(url, { mode: 'cors', signal, headers: start ? { Range: `bytes=${start}-` } : {} });
-      if (start && res.status === 200) {                // Server ignoriert die Fortsetzung -> sauber neu beginnen
+      const enc = (res.headers.get('content-encoding') || '').toLowerCase();
+      const encoded = !!enc && enc !== 'identity';
+      if (start && (res.status === 200 || res.status === 416 || encoded)) {   // Fortsetzen nicht möglich -> sauber neu beginnen
         try { res.body.cancel(); } catch (e) { /* egal */ }
-        await clearParts(cache, url);
-        meta = { total: 0, parts: 0, bytes: 0, done: false };
-        if (++fails > 2) throw new Error('Server unterstützt kein Fortsetzen');
+        await restart();
         continue;
       }
       if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status);
-      const len = Number(res.headers.get('content-length')) || 0;
+      // Bei komprimierter Lieferung ist content-length die gepackte Größe, nicht die der Datei
+      const len = encoded ? 0 : Number(res.headers.get('content-length')) || 0;
+      if (encoded) meta.enc = true;
       if (!meta.total && len) meta.total = start + len;
       const reader = res.body.getReader();
       let cur = new Uint8Array(PART), fill = 0, last = 0;
@@ -145,10 +156,13 @@ async function downloadResumable(url, onProgress, signal) {
           fill += n; off += n;
           if (fill === PART) { await flush(false); progressed = true; }
         }
+        // Mehr Daten als angekündigt: Der Browser entpackt eine komprimierte Lieferung
+        // (bei fremden Servern ist das an den Kopfzeilen nicht erkennbar) -> Größe unbekannt
+        if (meta.total && meta.bytes + fill > meta.total) { meta.total = 0; meta.enc = true; }
         const now = Date.now();
         if (now - last > 300) { last = now; onProgress(meta.bytes + fill, meta.total); }
       }
-      if (meta.total && meta.bytes + fill !== meta.total) {
+      if (meta.total && meta.bytes + fill < meta.total) {
         await flush(false);
         throw new Error('Verbindung abgebrochen');
       }
@@ -178,7 +192,7 @@ async function ensureModel(key, report) {
     const order = st.url ? [st.url, ...m.urls.filter((u) => u !== st.url)] : m.urls;   // angefangenen Download zuerst fortsetzen
     for (const url of order) {
       try {
-        await downloadResumable(url, (got, total, retry) => report(got, total || m.mb * 1e6, retry), ctrl.signal);
+        await downloadResumable(url, (got, total, retry) => report(got, Math.max(got, total || m.mb * 1e6), retry), ctrl.signal);
         return;
       } catch (e) {
         lastErr = e;
@@ -191,7 +205,12 @@ async function ensureModel(key, report) {
   try { await promise; } finally { delete downloads[key]; }
 }
 
-async function getSession(key) {
+async function clearModel(key) {
+  const cache = await caches.open(MODEL_CACHE);
+  for (const url of MODELS[key].urls) { await cache.delete(url); await clearParts(cache, url); }
+}
+
+async function getSession(key, retried) {
   if (!sessions[key]) {
     let buf = await loadCached(key);
     if (!buf) {
@@ -203,7 +222,17 @@ async function getSession(key) {
       if (!buf) throw new Error(`${MODELS[key].name} konnte nicht gelesen werden.`);
     }
     status(`${MODELS[key].name} wird vorbereitet …`, null);
-    sessions[key] = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    try {
+      sessions[key] = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    } catch (e) {
+      // Datei unlesbar (z. B. durch einen fehlerhaften früheren Download): einmal neu laden.
+      // Speichermangel wird hier bewusst nicht behandelt – dafür gibt es den Rückfall auf Standard.
+      const msg = String((e && e.message) || e);
+      if (retried || !/protobuf|pars|failed to load|invalid|corrupt/i.test(msg)) throw e;
+      buf = null;
+      await clearModel(key);
+      return getSession(key, true);
+    }
   }
   return sessions[key];
 }

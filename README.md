@@ -30,7 +30,7 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 | Kommandos | freie Sätze wie „etwas wärmer und das Rot raus“, „deutlich heller, mehr Kontrast“, „nur Blau behalten“, „Gelbstich entfernen“, „Retro-Look“, „rückgängig“, „zurück zum Original“ |
 | Qualität | Standard (MI-GAN, schnell) oder Höchste Qualität (LaMa, einmalig 208 MB, langsamer) unter „Mehr“ |
 | Reset | schließt das aktuelle Foto und zeigt wieder die leere Fläche (mit Rückfrage, wenn schon bearbeitet wurde) |
-| Bildschirm | bleibt an, solange gerechnet wird; die Ausschalttaste schaltet ihn trotzdem jederzeit aus |
+| Bildschirm | bleibt an, solange gerechnet wird; die Ausschalttaste schaltet ihn trotzdem jederzeit aus. Lehnt das Handy das ab (z. B. im Energiesparmodus), sagt die App Bescheid |
 | Fortsetzen | beendet Android die App während einer Rekonstruktion, fragt sie beim nächsten Öffnen „Fortsetzen?“ und macht an der Abbruchstelle weiter – schon berechnete Bildteile werden übersprungen |
 | Hinweis, wenn fertig | unter „Mehr“ einschalten: Läuft die App im Hintergrund weiter, meldet sie sich per Benachrichtigung, sobald das Bild fertig ist |
 
@@ -48,7 +48,7 @@ Im Ordner ein Terminal öffnen und `python -m http.server 8000` starten, dann `h
 
 Die Rekonstruktionsmodelle werden beim ersten Gebrauch von Hugging Face geladen (Ersatz: jsDelivr/unpkg) und dauerhaft im Browser gespeichert – in Teilen zu 4 MB, jeder Teil sofort. Bricht die Verbindung ab, wird an der Abbruchstelle fortgesetzt (automatisch bis zu 6 Versuche, danach beim nächsten Start); bereits geladene Daten werden nie erneut übertragen.
 
-Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wird mit Standard gearbeitet. Im Mobilfunknetz fragt die App vorher und kann den Download auf WLAN verschieben. Unter „Mehr“ steht, wie viel geladen ist und ob der App-Speicher dauerhaft gesichert ist. Ist er das nicht, darf Android ihn bei Speichermangel leeren – dann die App über das Chrome-Menü installieren.
+Das große Modell für „Höchste Qualität“ lädt im Hintergrund, solange wird mit Standard gearbeitet. Im Mobilfunknetz fragt die App vorher und kann den Download auf WLAN verschieben. Unter „Mehr“ steht, wie viel geladen ist, ob der App-Speicher dauerhaft gesichert ist und welche App-Version läuft. Nach einem Update reicht es, die App einmal zu schließen und neu zu öffnen. Ist er das nicht, darf Android ihn bei Speichermangel leeren – dann die App über das Chrome-Menü installieren.
 
 Für das Fortsetzen nach einem Abbruch legt die App vor jeder Rekonstruktion Foto und Markierung im App-Speicher ab und speichert jedes fertige Bildteil sofort. Nach Abschluss wird alles wieder gelöscht – auch diese Daten verlassen das Gerät nie.
 
